@@ -49,6 +49,24 @@ export const threadSummary = (fields: Partial<ThreadRow> = {}): ThreadRow => ({
   createdAt: '2026-09-22T00:00:00Z', subscriptions: 1, tickets: [{ id: 't1', title: '修复回归', state: 'open' }], evaluating: undefined,
   pending: 0, pollError: undefined, url: undefined, facts: { chat: { value: '团队群' } }, ...fields,
 })
+/** A team summary for the panel's team tab. */
+export const TEAM_SUMMARY = { id: 'team1', name: '文案团队', kind: 'group' as const, leadId: 'lead',
+  members: [{ id: 'lead', name: 'Lead', role: 'lead' }, { id: 'writer', name: 'Writer', role: 'specialist' }],
+  counts: { proposed: 1, waiting: 1, working: 1, done: 0, failed: 0 } }
+/** The team list the panel's team tab reads. */
+export const teamListView = (): ApiResponse<'GET teams'> => ({ teams: [TEAM_SUMMARY] })
+/** One team's detail: its tasks and messages, as the panel's team page reads them. */
+export const teamDetailView = (id = 'team1'): ApiResponse<'GET teams/:id'> => ({ team: { ...TEAM_SUMMARY, id },
+  tasks: [
+    { id: 'task1', assigneeId: 'writer', assigneeName: 'Writer', text: '改文案', state: 'working' as const, after: ['lead'],
+      outputs: ['copy.md'], createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:01:00Z' },
+    { id: 'task2', assigneeId: 'lead', assigneeName: 'Lead', text: '审阅', state: 'waiting' as const, after: [], outputs: [],
+      createdAt: '2026-09-23T00:00:00Z' },
+  ],
+  messages: [
+    { id: 'm1', from: 'lead', fromName: 'Lead', text: '分一下工', at: '2026-09-23T00:00:00Z', kind: 'task' as const, taskId: 'task1' },
+    { id: 'm2', from: 'writer', fromName: 'Writer', text: '已开工', at: '2026-09-23T00:01:00Z', kind: 'report' as const, taskId: 'task1' },
+  ] })
 type TriggerFields = Partial<Omit<TriggerRow, 'disposition' | 'actions'>> & { disposition?: Partial<TriggerRow['disposition']> }
 /** Build a trigger row on the default thread and compute `actions.requeue` using the host's eligibility rules. */
 export function trigger(id: string, at: string, { disposition, ...fields }: TriggerFields = {}): TriggerRow {
@@ -91,6 +109,7 @@ export interface PanelServer {
   prompts: PromptsView
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
+  teams: ApiResponse<'GET teams'>; teamDetails: Record<string, ApiResponse<'GET teams/:id'>>
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
   requests: { path: string; method: string; body?: unknown }[]
@@ -258,6 +277,7 @@ function initial(): PanelServer {
       defaultChanged: [], revisions: [{ ...defaults, changed: [] }], sessions: [], notificationPending: false, next_offset: null },
     tickets: { open: [ticketSummary()], ended: [ended] }, ticketDetails: { t1: ticketDetail() },
     threads: [threadSummary()], threadPages: threadPage,
+    teams: teamListView(), teamDetails: { team1: teamDetailView() },
     person: [ticketSummary({ attention: { id: 'q1', question: '需要确认按钮颜色' }, note: { text: '需要确认按钮颜色', error: false }, reply },
       { stage: 'person', action: 'answer' }),
       ticketSummary({ id: 't4', title: '截图工具', actions: { retry: true, stop: true }, sessionId: 'worker-t4',
@@ -337,6 +357,17 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
     server.tickets.open = []; server.person = server.person.filter(ticket => ticket.id !== params.id)
     return { stopped: true }
+  } },
+  'GET teams': { answer: () => server.teams },
+  'GET teams/:id': { answer: ({ params }) => server.teamDetails[params.id] ?? refuse(404, 'Team not found') },
+  'POST teams/:id/close': { body: true, answer: ({ params, body }) => {
+    const detail = server.teamDetails[params.id]
+    if (!detail) return refuse(404, 'Team not found')
+    server.teamDetails[params.id] = { ...detail, team: { ...detail.team,
+      closed: { at: '2026-09-23T00:02:00Z', by: detail.team.leadId ?? '', summary: body.summary } } }
+    server.teams = { teams: server.teams.teams.map(team => team.id === params.id ? { ...team,
+      closed: { at: '2026-09-23T00:02:00Z', by: detail.team.leadId ?? '', summary: body.summary } } : team) }
+    return { closed: true }
   } },
   'POST executor/pause': { body: true, answer: ({ body }) => {
     server.settings = { ...server.settings, paused: body.paused }

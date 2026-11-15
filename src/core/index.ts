@@ -2,8 +2,8 @@
 export * from './model.ts'
 export * from './ports.ts'
 export { Engine, type EngineForExecutor, type EngineForLead, type EngineForMainSession, type EngineForPeople, type EngineForSettings,
-  type EngineForSources, type EngineForSpecialist, type EngineForSuperagentRunner, type EngineOptions, type Outcome, type ReceiveResult,
-  type Reply, type ReplyRequest, type WorkerReport } from './engine.ts'
+  type EngineForSources, type EngineForSpecialist, type EngineForSuperagentRunner, type EngineForTeamPanel, type EngineOptions, type Outcome,
+  type ReceiveResult, type Reply, type ReplyRequest, type WorkerReport } from './engine.ts'
 export { Teams, inCycle, taskReason } from './team.ts'
 export { UserError, USER_ERRORS, type UserErrorCode } from './errors.ts'
 export { REASONS, reasonText, said, type Reason, type ReasonCode } from './reasons.ts'

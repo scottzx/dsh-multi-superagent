@@ -200,11 +200,12 @@ The `multi-superagent` fork delivers the design above as a **runnable skeleton**
   and the team-mandate basis, with unit tests over in-memory repositories;
 - the `SuperagentRunner` port and its `DshExecutor` implementation, with superagent Sessions;
 - the lead and specialist tools, and the `superagent` prompt role;
-- the team tables and schema 12.
+- the team tables and schema 12;
+- the Web panel's Team tab: the list of team conversations, one team's tasks and messages, and closing a
+  round from the panel.
 
 Deferred to a later change, and not claimed by the skeleton:
 
-- the Web panel's team pages (the panel still shows Tickets and the lead's flow);
 - team-aware Source admission (a team still receives work only through the lead);
 - automatic division (the lead still proposes explicitly);
 - direct superagent-to-superagent ticket hand-off beyond delegation under a team mandate.

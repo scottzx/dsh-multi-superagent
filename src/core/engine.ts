@@ -326,5 +326,7 @@ export type EngineForLead = Pick<Engine, 'superagent' | 'team' | 'openTeams' | '
   | 'dispatchTeam' | 'closeTeam' | 'delegateTeamWork' | 'addSuperagent' | 'addTeam'>
 /** What a specialist superagent asks of the Engine, through its team tools: its task, the team's talk, and delegation. */
 export type EngineForSpecialist = Pick<Engine, 'tasks' | 'messages' | 'sendTeamMessage' | 'reportTeamTask' | 'delegateTeamWork'>
+/** What the panel asks of the Engine for the team view: read the teams and close a round. */
+export type EngineForTeamPanel = Pick<Engine, 'openTeams' | 'team' | 'tasks' | 'messages' | 'closeTeam'>
 
 export type { TeamTask }
