@@ -7,6 +7,8 @@ export { textPage } from './cards.ts'
 export const sharedPrompt = promptFile('shared')
 export const masterPrompt = promptFile('orchestrator')
 export const workerPrompt = promptFile('worker')
+/** The lead and professional superagent role's built-in policy; a team may override it (`builtInParts`). */
+export const superagentPrompt = promptFile('superagent')
 /** Built-in policy sections referenced by role prompts; a team may override them. */
 export const guides: Readonly<Record<string, string>> = Object.fromEntries(['subscriptions', 'replies', 'dispatch', 'work']
   .map(name => [name, promptFile(name)]))
@@ -20,8 +22,9 @@ export const teamDefaults = {
 
 export const mainAdmissionPolicy = promptFile('admission')
 
-const handoff = { shared: promptFile('handoff'), orchestrator: promptFile('handoff-orchestrator'), worker: promptFile('handoff-worker') }
-export const handoffPolicy = (role: 'orchestrator' | 'worker'): string => `${handoff.shared}\n${handoff[role]}`
+const handoff = { shared: promptFile('handoff'), orchestrator: promptFile('handoff-orchestrator'), worker: promptFile('handoff-worker'),
+  superagent: promptFile('handoff-superagent') }
+export const handoffPolicy = (role: 'orchestrator' | 'worker' | 'superagent'): string => `${handoff.shared}\n${handoff[role]}`
 
 export const autoMergeThreshold = (lines: number): string => `it changes fewer than ${lines} lines (additions plus deletions);`
 

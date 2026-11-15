@@ -278,7 +278,7 @@ it('previews a prompt configuration without saving it, and saves one only agains
   const save = (args: Record<string, unknown>) => h.runTool(h.runtime.masterId, 'orchestrator_prompts_save', args)
   const config = { ...h.runtime.prompts.current().config, scope: 'Finish what was asked.' }
   const preview = await save({ config, preview: true }) as { previews: { role: string; read: string }[] }
-  expect(preview.previews.map(item => item.role)).toEqual(['orchestrator', 'worker'])
+  expect(preview.previews.map(item => item.role)).toEqual(['orchestrator', 'worker', 'superagent'])
   let text = '', offset: number | null = 0
   while (offset !== null) {
     const page = await read(preview.previews[1]!.read, { offset, limit: 8000 }) as { text: string; next_offset: number | null }

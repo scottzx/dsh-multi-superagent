@@ -1,7 +1,7 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
 import { UserError } from './errors.ts'
 import { isoTime, liveTicket } from './model.ts'
-import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, Trigger } from './model.ts'
+import type { ChannelRef, Decision, PolicyEffect, Superagent, Team, TeamMessage, TeamMessageKind, TeamTask, ThreadRef, Ticket, Trigger } from './model.ts'
 import type { Candidate, Repositories } from './ports.ts'
 import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
@@ -9,6 +9,7 @@ import { Evals, type Outcome } from './evals.ts'
 import { Intake, type ReceiveResult } from './intake.ts'
 import { Replies, type Reply, type ReplyRequest } from './replies.ts'
 import { Tickets } from './tickets.ts'
+import { Teams } from './team.ts'
 
 export type { EngineOptions } from './part.ts'
 export type { WorkerReport } from './assignments.ts'
@@ -28,6 +29,7 @@ export class Engine {
   private readonly assignments: Assignments
   private readonly evals: Evals
   private readonly intake: Intake
+  private readonly teams: Teams
   constructor(private readonly options: EngineOptions) {
     this.repo = options.repo
     this.replies = new Replies(options)
@@ -35,6 +37,7 @@ export class Engine {
     this.assignments = new Assignments(options, this.tickets, this.replies)
     this.evals = new Evals(options, this.tickets)
     this.intake = new Intake(options, this.tickets)
+    this.teams = new Teams(options, this.tickets)
   }
 
   // Sources
@@ -246,6 +249,54 @@ export class Engine {
     this.repo.atomic(() => { this.assignments.interrupted(ticketId, assignmentId) })
   }
 
+  // The team of superagents
+
+  /** Register a superagent identity. @throws UserError when the id is taken. */
+  addSuperagent(superagent: Superagent): Superagent { return this.repo.atomic(() => this.teams.addSuperagent(superagent)) }
+  /** Create a team conversation. @throws UserError when the id is taken or a member is unknown. */
+  addTeam(team: Team): Team { return this.repo.atomic(() => this.teams.addTeam(team)) }
+  /** A superagent identity, or undefined when it is unknown. */
+  superagent(id: string): Superagent | undefined { return this.teams.superagent(id) }
+  /** A team, or undefined when it is unknown. */
+  team(id: string): Team | undefined { return this.teams.team(id) }
+  /** The open teams, oldest first. */
+  openTeams(): Team[] { return this.teams.openTeams() }
+  /** The tasks of a team, oldest first. */
+  tasks(teamId: string): TeamTask[] { return this.teams.tasks(teamId) }
+  /** The messages of a team, oldest first. */
+  messages(teamId: string): TeamMessage[] { return this.teams.messages(teamId) }
+  /** Record a message on a team and deliver it to the members' running turns. */
+  sendTeamMessage(teamId: string, from: string, text: string, kind: TeamMessageKind, taskId?: string, triggerId?: string): TeamMessage {
+    return this.repo.atomic(() => this.teams.sendMessage(teamId, from, text, kind, taskId, triggerId))
+  }
+  /** Propose a division for a team: one task per member, each with its text, `after` members and declared outputs. */
+  proposeTeam(teamId: string, specs: readonly { assigneeId: string; text: string; after?: string[]; outputs?: string[] }[]): TeamTask[] {
+    return this.repo.atomic(() => this.teams.propose(teamId, specs))
+  }
+  /** Dispatch a team's proposed tasks: start those ready and mark the rest waiting. */
+  dispatchTeam(teamId: string): TeamTask[] { return this.repo.atomic(() => this.teams.dispatch(teamId)) }
+  /** Record a team task's outcome from its assignee. */
+  reportTeamTask(taskId: string, report: { state: 'done' | 'failed' | 'waiting'; summary: string; outputs?: string[] }): TeamTask {
+    return this.repo.atomic(() => this.teams.report(taskId, report))
+  }
+  /** Close a team round with the lead's closing decision. */
+  closeTeam(teamId: string, by: string, summary: string): TeamMessage { return this.repo.atomic(() => this.teams.close(teamId, by, summary)) }
+  /** Delegate concrete implementation to a worker under a team mandate. */
+  delegateTeamWork(teamId: string, taskId: string, text: string, name: string, outputs?: string[]): { ticketId: string; outputs: string[] } {
+    return this.repo.atomic(() => this.teams.delegate(teamId, taskId, text, name, outputs))
+  }
+
+  // The SuperagentRunner
+
+  /** The runner's fact that a task's turn runs. */
+  superagentStarted(teamId: string, taskId: string): void { this.repo.atomic(() => this.teams.superagentStarted(teamId, taskId)) }
+  /** The runner's fact that a team's messages reached a running turn. */
+  superagentDelivered(teamId: string, taskId: string): void { this.repo.atomic(() => this.teams.superagentDelivered(teamId, taskId)) }
+  /** The runner's fact that a task's turn ended without a report. */
+  superagentTurnEnded(teamId: string, taskId: string): void { this.repo.atomic(() => this.teams.superagentTurnEnded(teamId, taskId)) }
+  /** The runner's fact that a task's turn failed. */
+  superagentFailed(teamId: string, taskId: string, error: string): void { this.repo.atomic(() => this.teams.superagentFailed(teamId, taskId, error)) }
+
   // Settings
 
   /**
@@ -268,3 +319,12 @@ export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
   | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply'>
+/** What the SuperagentRunner reports back to the Engine about superagent turns. */
+export type EngineForSuperagentRunner = Pick<Engine, 'superagentStarted' | 'superagentDelivered' | 'superagentTurnEnded' | 'superagentFailed'>
+/** What the lead asks of the Engine, through its team tools: read the team, propose and dispatch a division, close a round. */
+export type EngineForLead = Pick<Engine, 'superagent' | 'team' | 'openTeams' | 'tasks' | 'messages' | 'sendTeamMessage' | 'proposeTeam'
+  | 'dispatchTeam' | 'closeTeam' | 'delegateTeamWork' | 'addSuperagent' | 'addTeam'>
+/** What a specialist superagent asks of the Engine, through its team tools: its task, the team's talk, and delegation. */
+export type EngineForSpecialist = Pick<Engine, 'tasks' | 'messages' | 'sendTeamMessage' | 'reportTeamTask' | 'delegateTeamWork'>
+
+export type { TeamTask }

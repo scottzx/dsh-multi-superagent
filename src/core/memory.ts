@@ -1,5 +1,6 @@
 /** In-memory repository implementation for testing and ephemeral engine instances. */
-import { latestAssignment, type Decision, type Thread, type Ticket, type Trigger, type TriggerDisposition } from './model.ts'
+import { latestAssignment, type Decision, type Superagent, type Team, type TeamMessage, type TeamTask, type Thread, type Ticket, type Trigger,
+  type TriggerDisposition } from './model.ts'
 import type { Repositories } from './ports.ts'
 
 const clone = <T>(value: T): T => structuredClone(value)
@@ -13,8 +14,13 @@ export class MemoryRepositories implements Repositories {
   private readonly threadRows = new Map<string, Thread>()
   private readonly ticketRows = new Map<string, Ticket>()
   private readonly decisionRows = new Map<string, Decision>()
+  private readonly superagentRows = new Map<string, Superagent>()
+  private readonly teamRows = new Map<string, Team>()
+  private readonly teamMessageRows = new Map<string, TeamMessage>()
+  private readonly teamTaskRows = new Map<string, TeamTask>()
   atomic<T>(work: () => T): T {
-    const maps: Map<string, unknown>[] = [this.triggerRows, this.dispositions, this.threadRows, this.ticketRows, this.decisionRows]
+    const maps: Map<string, unknown>[] = [this.triggerRows, this.dispositions, this.threadRows, this.ticketRows, this.decisionRows,
+      this.superagentRows, this.teamRows, this.teamMessageRows, this.teamTaskRows]
     const snapshot = maps.map(map => new Map(map))
     try { return work() }
     catch (error) {
@@ -46,5 +52,27 @@ export class MemoryRepositories implements Repositories {
     get: (id: string) => clone(this.decisionRows.get(id)),
     save: (decision: Decision) => { this.decisionRows.set(decision.id, clone(decision)) },
     byThread: (key: string) => [...this.decisionRows.values()].filter(decision => decision.threadKey === key).map(clone),
+  }
+  readonly team = {
+    superagents: {
+      get: (id: string) => clone(this.superagentRows.get(id)),
+      save: (value: Superagent) => { this.superagentRows.set(value.id, clone(value)) },
+      list: () => [...this.superagentRows.values()].map(clone),
+    },
+    teams: {
+      get: (id: string) => clone(this.teamRows.get(id)),
+      save: (value: Team) => { this.teamRows.set(value.id, clone(value)) },
+      list: () => [...this.teamRows.values()].map(clone),
+    },
+    messages: {
+      get: (id: string) => clone(this.teamMessageRows.get(id)),
+      save: (value: TeamMessage) => { this.teamMessageRows.set(value.id, clone(value)) },
+      list: (teamId: string) => [...this.teamMessageRows.values()].filter(message => message.teamId === teamId).map(clone),
+    },
+    tasks: {
+      get: (id: string) => clone(this.teamTaskRows.get(id)),
+      save: (value: TeamTask) => { this.teamTaskRows.set(value.id, clone(value)) },
+      list: (teamId: string) => [...this.teamTaskRows.values()].filter(task => task.teamId === teamId).map(clone),
+    },
   }
 }

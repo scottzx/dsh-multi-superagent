@@ -44,6 +44,17 @@ export const USER_ERRORS = {
   sourceNotInstalled: ['refused', 'The {source} Source kind is not installed'],
   noLabels: ['refused', 'This Source has no names to refresh'],
   nothingToSync: ['refused', 'The {source} Source\'s part of the Policy has nothing to sync from, or the Source is off or waiting for setup'],
+  unknownSuperagent: ['missing', 'Unknown superagent {superagent}'],
+  unknownTeam: ['missing', 'Unknown team {team}'],
+  unknownTask: ['missing', 'Unknown team task {task}'],
+  superagentExists: ['refused', 'A superagent with that id already exists'],
+  teamExists: ['refused', 'A team with that id already exists'],
+  teamLeadMissing: ['refused', 'A group team needs a lead who is one of its members'],
+  notAMember: ['refused', '{member} is not a member of this team'],
+  teamClosed: ['refused', 'This team round is closed'],
+  noProposedTasks: ['refused', 'This team has no proposed tasks to dispatch'],
+  taskNotWorking: ['refused', 'This team task is not working'],
+  outputsMissing: ['refused', 'A done task must report the deliverables it declared'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
 export type UserErrorCode = keyof typeof USER_ERRORS
 

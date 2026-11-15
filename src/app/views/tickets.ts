@@ -19,7 +19,7 @@ export function basisFacts(basis: MandateBasis, rule: Snapshot['rule']): { facts
   const facts: BasisFact[] = []
   if (basis.sender) facts.push({ name: 'sender', value: basis.sender })
   if (basis.via === 'bot') facts.push({ name: 'bot' })
-  if (basis.via !== 'followup' && basis.addressed) facts.push({ name: 'addressed', value: basis.addressed })
+  if (basis.via !== 'followup' && 'addressed' in basis && basis.addressed) facts.push({ name: 'addressed', value: basis.addressed })
   // Imported bases already record their follow-up in `authority`.
   if (basis.via === 'followup' && !basis.authority) facts.push({ name: 'followup' })
   if (basis.via === 'admission') facts.push({ name: 'admission', value: basis.cell })

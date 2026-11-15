@@ -1,8 +1,8 @@
 /** Shared base class and configuration for Engine domain parts. */
 import { UserError } from './errors.ts'
 import { followupOwners, reached, threadKey } from './model.ts'
-import type { Thread, ThreadRef, Ticket, Trigger } from './model.ts'
-import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, SourceScope } from './ports.ts'
+import type { Thread, ThreadRef, Team, TeamTask, Ticket, Trigger } from './model.ts'
+import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, SourceScope, SuperagentRunner } from './ports.ts'
 
 export interface EngineOptions {
   repo: Repositories
@@ -11,8 +11,12 @@ export interface EngineOptions {
   scope: SourceScope
   assessor: Assessor
   executor: Executor
+  /** Runs superagent turns: one Session per superagent, launched, delivered to and stopped. Optional: an Engine that never dispatches a team needs no runner. */
+  superagent?: SuperagentRunner
   outbox: Outbox
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
+  /** Prepares a Ticket a specialist delegated to a worker, which carries a team mandate rather than an accept outcome. */
+  prepareDelegated?: (ticket: Ticket, delegation: { text: string; name: string; outputs: string[] }) => Ticket
   now?: () => string
   emit?: (event: DomainEvent) => void
 }

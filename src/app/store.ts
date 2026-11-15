@@ -2,8 +2,8 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, type ReplyStatus, type Repositories, type Thread, type ThreadFact,
-  type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
+import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, type ReplyStatus, type Repositories, type Superagent, type Team,
+  type TeamMessage, type TeamTask, type Thread, type ThreadFact, type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
 import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
@@ -74,6 +74,10 @@ export class Store implements Repositories {
             CREATE TABLE IF NOT EXISTS thread (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS ticket (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS decision (id TEXT PRIMARY KEY, thread TEXT NOT NULL, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS superagent (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS team (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS team_message (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS team_task (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS trigger_thread (thread TEXT NOT NULL, id TEXT NOT NULL, at TEXT NOT NULL, human INTEGER NOT NULL,
               PRIMARY KEY (thread, id));
@@ -86,7 +90,8 @@ export class Store implements Repositories {
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
           `)
           this.addColumns()
-          if (migrating) migrateTo11(this)
+          // Schema 10 is migrated in place; schema 11 databases only gain the team tables and the new version.
+          if (version !== undefined && version < 11) migrateTo11(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {
@@ -244,6 +249,28 @@ export class Store implements Repositories {
     get: (id: string): Decision | undefined => { const row = this.db.prepare('SELECT value FROM decision WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Decision : undefined },
     save: (decision: Decision): void => { this.db.prepare('INSERT INTO decision VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, thread=excluded.thread').run(decision.id, decision.threadKey, JSON.stringify(decision)) },
     byThread: (threadKeyValue: string): Decision[] => this.db.prepare('SELECT value FROM decision WHERE thread=? ORDER BY rowid').all(threadKeyValue).map(row => JSON.parse(String(row.value)) as Decision),
+  }
+  readonly team = {
+    superagents: {
+      get: (id: string): Superagent | undefined => { const row = this.db.prepare('SELECT value FROM superagent WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Superagent : undefined },
+      save: (value: Superagent): void => { this.db.prepare('INSERT INTO superagent VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(value.id, JSON.stringify(value)) },
+      list: (): Superagent[] => this.values('SELECT value FROM superagent ORDER BY rowid'),
+    },
+    teams: {
+      get: (id: string): Team | undefined => { const row = this.db.prepare('SELECT value FROM team WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Team : undefined },
+      save: (value: Team): void => { this.db.prepare('INSERT INTO team VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(value.id, JSON.stringify(value)) },
+      list: (): Team[] => this.values('SELECT value FROM team ORDER BY rowid'),
+    },
+    messages: {
+      get: (id: string): TeamMessage | undefined => { const row = this.db.prepare('SELECT value FROM team_message WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as TeamMessage : undefined },
+      save: (value: TeamMessage): void => { this.db.prepare('INSERT INTO team_message VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(value.id, JSON.stringify(value)) },
+      list: (teamId: string): TeamMessage[] => this.values('SELECT value FROM team_message WHERE value ->> \'$.teamId\' = ? ORDER BY rowid', teamId),
+    },
+    tasks: {
+      get: (id: string): TeamTask | undefined => { const row = this.db.prepare('SELECT value FROM team_task WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as TeamTask : undefined },
+      save: (value: TeamTask): void => { this.db.prepare('INSERT INTO team_task VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(value.id, JSON.stringify(value)) },
+      list: (teamId: string): TeamTask[] => this.values('SELECT value FROM team_task WHERE value ->> \'$.teamId\' = ? ORDER BY rowid', teamId),
+    },
   }
   /** Read-only queries for management views, orchestrator tools, and source polling (see `storeReads`). */
   readonly read: ReturnType<typeof storeReads>

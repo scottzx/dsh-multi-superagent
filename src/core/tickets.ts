@@ -55,6 +55,21 @@ export class Tickets extends EnginePart {
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
   }
   /**
+   * Create the Ticket a specialist delegated to a worker, under the team mandate `mandate`: no Channels or Threads of its own
+   * (the specialist owns the conversation), the delegation text and its declared deliverables as its first Input, and its
+   * first Assignment queued for launch.
+   */
+  createDelegated(id: string, mandate: Mandate, delegation: { text: string; name: string; outputs: string[] }, at: string): Ticket {
+    let ticket: Ticket = { id, title: delegation.text.replace(/\s+/g, ' ').slice(0, 160), decisionId: '', mandate, channels: [],
+      assignments: [], inputs: [], undelivered: [], createdAt: at, updatedAt: at, origin: { triggerId: '', triggerIds: [] } }
+    ticket = this.options.prepareDelegated?.(ticket, delegation) ?? ticket
+    const assignment = this.newAssignment(ticket)
+    this.repo.tickets.save(ticket)
+    const body = `${delegation.text}${delegation.outputs.length ? `\n\nDeliverables:\n${delegation.outputs.join('\n')}` : ''}`
+    this.addInput(ticket, { id: key('input', id, 'delegated', at), kind: 'text', text: body, at })
+    return this.require(id)
+  }
+  /**
    * Subscribes an open ticket to `thread` and records it in `ticket.follows` (`own` when opened by the ticket).
    * @throws UserError when the ticket is unknown or has ended.
    */
