@@ -44,12 +44,16 @@ it is not a Source, and its messages are not Triggers.
 
 ### Superagent
 
-A first-class agent identity in the domain: `{ id, name, role: 'lead' | 'specialist', capabilities?, createdAt }`.
+A first-class agent identity in the domain: `{ id, name, role: 'lead' | 'specialist', capabilities?, directory?, createdAt }`.
 
 - A superagent is the unit of a team's membership and of the Session that runs it.
 - `role: 'lead'` names the admission authority. At most one lead exists, and it is the main Session.
 - `role: 'specialist'` names a professional superagent. Capabilities are prompt text the lead uses to
   divide work; the core does not interpret them.
+- `directory` optionally binds the superagent to its own project directory, so a specialist can be pointed at
+  its own checkout or module (one directory per superagent). When it is absent or blank, the runner starts the
+  superagent's Session in the machine's **state directory**, as before. The lead sets it through
+  `lead_team_create_superagent`; the panel shows it on the team's detail page.
 - One writer: the Engine, through the Teams part.
 
 ### Team
@@ -161,13 +165,13 @@ within its task. New admission stays with the lead.
 
 | Part | Module | Does |
 | --- | --- | --- |
-| Domain types | `src/core/model.ts` | `Superagent`, `Team`, `TeamMessage`, `TeamTask`, `SuperagentTurn`, the `team` mandate basis |
+| Domain types | `src/core/model.ts` | `Superagent`, `Team`, `TeamMessage`, `TeamTask`, `SuperagentTurn`, the `team` mandate basis, and `superagentWorkspace` (a superagent's directory or the fallback) |
 | Port | `src/core/ports.ts` | `SuperagentRunner`: start, deliver and stop a superagent turn; the team repositories |
 | Engine part | `src/core/team.ts` | `Teams`: superagent and team records, message routing, the dispatch state machine, closing |
 | Engine | `src/core/engine.ts` | The Teams part, the lead and specialist role interfaces, delegation to a Ticket |
-| Runner | `src/executor/dsh.ts` | `DshExecutor` implements `SuperagentRunner`: one superagent Session and its turns |
+| Runner | `src/executor/dsh.ts` | `DshExecutor` implements `SuperagentRunner`: one superagent Session and its turns, launched in the superagent's bound directory or the state directory |
 | Sessions | `src/app/sessions.ts` | The `superagent` role, its preset, its prompt and tools |
-| Lead tools | `src/app/tools/main.ts` (and `src/app/tools/superagent.ts`) | `lead_propose`, `lead_dispatch`, `lead_team_wait`, `lead_team_message`, `lead_team_close` |
+| Lead tools | `src/app/tools/main.ts` (and `src/app/tools/superagent.ts`) | `lead_team_create_superagent` (including its `directory`), `lead_team_create`, `lead_team_propose`, `lead_team_dispatch`, `lead_team_message`, `lead_team_close`, `lead_team_read` |
 | Specialist tools | `src/app/tools/superagent.ts` | `superagent_team_report`, `superagent_team_message`, `superagent_delegate` |
 | Prompts | `prompts/` | `lead.md`, `superagent.md`, and the team-communication section |
 | Store | `src/app/store.ts`, `src/app/migration.ts` | The `team`, `superagent`, `team_message` and `team_task` tables, schema 12 |
@@ -197,7 +201,8 @@ that never created a team runs the existing code path untouched.
 The `multi-superagent` fork delivers the design above as a **runnable skeleton**:
 
 - the four domain concepts, the dispatch state machine, dependency ordering and cycle detection, closing,
-  and the team-mandate basis, with unit tests over in-memory repositories;
+  the team-mandate basis, and a superagent's bound project directory (optional, falling back to the state
+  directory), with unit tests over in-memory repositories;
 - the `SuperagentRunner` port and its `DshExecutor` implementation, with superagent Sessions;
 - the lead and specialist tools, and the `superagent` prompt role;
 - the team tables and schema 12;

@@ -4,7 +4,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
+import { key, latestAssignment, latestReport, liveTicket, runningAssignment, superagentWorkspace, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, EngineForSuperagentRunner, Execution, Executor, Mandate, PolicyEffect,
   SuperagentRunner, Team, TeamMessage, TeamTask, Ticket, TicketInput, Trigger } from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
@@ -740,7 +740,9 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     const task = team && this.host.store.team.tasks.get(taskId)
     if (!team || !task || task.teamId !== teamId || task.state !== 'working' || !task.turn || task.turn.state !== 'pending') return
     const sessionId = superagentSessionId(task.assigneeId)
-    await this.host.sessions.ensure(sessionId, this.host.machine.stateDir, `${team.name} · ${task.assigneeId}`, 'superagent')
+    // The superagent's own project directory when the lead bound one; otherwise the shared state directory.
+    const workspace = superagentWorkspace(this.host.store.team.superagents.get(task.assigneeId), this.host.machine.stateDir)
+    await this.host.sessions.ensure(sessionId, workspace, `${team.name} · ${task.assigneeId}`, 'superagent')
     const messages = this.host.store.team.messages.list(teamId)
     const others = this.host.store.team.tasks.list(teamId).filter(item => item.id !== task.id)
     await this.host.sessions.prompt(sessionId, `superagent-task:${task.id}`, superagentTaskMessage(team, task, messages, others), 'queue',
@@ -756,7 +758,9 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     const messages = this.host.store.team.messages.list(teamId).filter(message => !delivered || message.at > delivered)
     if (!messages.length) return
     const sessionId = superagentSessionId(task.assigneeId)
-    if (!this.host.context.agents.get(sessionId as SessionId)) await this.host.sessions.ensure(sessionId, this.host.machine.stateDir, `${team.name} · ${task.assigneeId}`, 'superagent')
+    // A superagent keeps its bound project directory across deliveries, or the shared state directory when unbound.
+    const workspace = superagentWorkspace(this.host.store.team.superagents.get(task.assigneeId), this.host.machine.stateDir)
+    if (!this.host.context.agents.get(sessionId as SessionId)) await this.host.sessions.ensure(sessionId, workspace, `${team.name} · ${task.assigneeId}`, 'superagent')
     await this.host.sessions.prompt(sessionId, `superagent-deliver:${task.id}:${messages.at(-1)!.id}`,
       messages.map(message => `${message.from}: ${message.text}`).join('\n'), 'steer')
     this.host.engine.superagentDelivered(teamId, taskId)

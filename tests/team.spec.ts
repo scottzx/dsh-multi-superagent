@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { Engine, MemoryRepositories, UserError, inCycle, type Assessor, type EngineOptions, type Executor, type OutboundMessage, type Policy,
+import { Engine, MemoryRepositories, UserError, inCycle, superagentWorkspace, type Assessor, type EngineOptions, type Executor, type OutboundMessage, type Policy,
   type SuperagentRunner, type Team, type TeamTask } from '../src/core/index.ts'
 
 /** A minimal Policy: the team's delegation only reads its version. */
@@ -35,6 +35,19 @@ describe('the team of superagents', () => {
     expect(() => engine.addTeam({ id: 't4', name: 't4', kind: 'group', memberIds: ['a'], createdAt: '' })).toThrow(UserError)
     // A direct conversation needs no lead.
     expect(engine.addTeam({ id: 'd', name: 'd', kind: 'direct', memberIds: ['a', 'lead'], createdAt: '' }).kind).toBe('direct')
+  })
+
+  it('binds a superagent to its own project directory and falls back to the state directory', () => {
+    const { engine } = harness()
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', directory: '/srv/copy', createdAt: '' })
+    engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
+    expect(engine.superagent('a')?.directory).toBe('/srv/copy')
+    // A bound directory wins; an absent or blank one falls back to the state directory.
+    expect(superagentWorkspace(engine.superagent('a'), '/state')).toBe('/srv/copy')
+    expect(superagentWorkspace(engine.superagent('b'), '/state')).toBe('/state')
+    expect(superagentWorkspace({ id: 'x', name: 'X', role: 'specialist', directory: '   ', createdAt: '' }, '/state')).toBe('/state')
+    expect(superagentWorkspace(undefined, '/state')).toBe('/state')
   })
 
   it('dispatches a division, starts ready tasks, and marks the rest waiting', () => {

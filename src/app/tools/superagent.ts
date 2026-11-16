@@ -21,6 +21,8 @@ export interface SuperagentToolsHost {
 const MemberSchema = z.string().trim().min(1).max(200)
 const CapabilitySchema = z.string().trim().min(1).max(200)
 const TeamNameSchema = z.string().trim().min(1).max(160)
+/** A superagent's project directory: an absolute path the lead binds to it, so it runs in its own checkout. */
+const DirectorySchema = z.string().trim().min(1).max(1000).optional()
 const TaskSpecSchema = z.object({
   assignee_id: MemberSchema,
   text: z.string().trim().min(1).max(4000),
@@ -45,11 +47,12 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
   return [
     tool({
       name: 'lead_team_create_superagent',
-      description: 'Register a superagent identity, a lead or a specialist, with optional capabilities.',
+      description: 'Register a superagent identity, a lead or a specialist, with optional capabilities and an optional project directory it runs in.',
       schema: z.object({ id: MemberSchema, name: z.string().trim().min(1).max(160), role: z.enum(['lead', 'specialist']),
-        capabilities: z.array(CapabilitySchema).max(16).optional() }).strict(),
+        capabilities: z.array(CapabilitySchema).max(16).optional(), directory: DirectorySchema }).strict(),
       execute: async args => {
-        const superagent = engine.addSuperagent({ id: args.id, name: args.name, role: args.role, ...args.capabilities ? { capabilities: args.capabilities } : {}, createdAt: '' })
+        const superagent = engine.addSuperagent({ id: args.id, name: args.name, role: args.role, ...args.capabilities ? { capabilities: args.capabilities } : {},
+          ...args.directory ? { directory: args.directory } : {}, createdAt: '' })
         return { superagent }
       },
     }),

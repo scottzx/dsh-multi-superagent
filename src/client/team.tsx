@@ -121,6 +121,8 @@ export function TeamPage({ id }: { id?: string }) {
         <div style={{ display: 'contents' }}><dt>{t('teamKind')}</dt><dd><Tag tone="quiet">{t(`teamKind.${data.team.kind}`)}</Tag></dd></div>
         <div style={{ display: 'contents' }}><dt>{t('teamMembers')}</dt>
           <dd>{data.team.members.map(member => member.name).join(t('listSeparator'))}</dd></div>
+        <div style={{ display: 'contents' }}><dt>{t('teamWorkspace')}</dt>
+          <dd>{data.team.members.filter(member => member.directory).map(member => `${member.name}：${member.directory}`).join(t('listSeparator')) || t('teamWorkspaceNone')}</dd></div>
         {data.team.leadId && <div style={{ display: 'contents' }}><dt>{t('teamLead')}</dt>
           <dd>{data.team.members.find(member => member.id === data.team.leadId)?.name ?? data.team.leadId}</dd></div>}
         {data.team.closed && <div style={{ display: 'contents' }}><dt>{t('teamClosedAt')}</dt>

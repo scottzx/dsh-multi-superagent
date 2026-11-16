@@ -51,7 +51,7 @@ export const threadSummary = (fields: Partial<ThreadRow> = {}): ThreadRow => ({
 })
 /** A team summary for the panel's team tab. */
 export const TEAM_SUMMARY = { id: 'team1', name: '文案团队', kind: 'group' as const, leadId: 'lead',
-  members: [{ id: 'lead', name: 'Lead', role: 'lead' }, { id: 'writer', name: 'Writer', role: 'specialist' }],
+  members: [{ id: 'lead', name: 'Lead', role: 'lead' }, { id: 'writer', name: 'Writer', role: 'specialist', directory: '/Users/scott/projects/copy' }],
   counts: { proposed: 1, waiting: 1, working: 1, done: 0, failed: 0 } }
 /** The team list the panel's team tab reads. */
 export const teamListView = (): ApiResponse<'GET teams'> => ({ teams: [TEAM_SUMMARY] })

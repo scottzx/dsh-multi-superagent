@@ -31,6 +31,9 @@ it('opens a team to its tasks and messages and closes the round', async () => {
   expect(text()).toContain('等待')
   expect(text()).toContain('分一下工')
   expect(text()).toContain('已开工')
+  // The team shows each member's bound project directory.
+  expect(text()).toContain(zh.teamWorkspace)
+  expect(text()).toContain('/Users/scott/projects/copy')
   // Closing records the lead's decision and returns to the list.
   await click(zh.teamClose)
   await type(field<HTMLTextAreaElement>(zh.teamCloseSummary), '定：文案已改完')

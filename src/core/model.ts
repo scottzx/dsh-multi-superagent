@@ -330,8 +330,17 @@ export interface Superagent {
   role: SuperagentRole
   /** Capabilities are prompt text the lead uses to divide work; the core does not interpret them. */
   capabilities?: string[]
+  /**
+   * The project directory this superagent's Session runs in, when the lead bound one to it. One directory may host one
+   * superagent, so a specialist can be pointed at its own checkout or module. Optional: when it is absent (or blank),
+   * the runner falls back to the machine's state directory.
+   */
+  directory?: string
   createdAt: string
 }
+/** The directory a superagent's Session runs in: its bound project directory, or `fallback` when it has none. */
+export const superagentWorkspace = (superagent: Superagent | undefined, fallback: string): string =>
+  superagent?.directory?.trim() ? superagent.directory.trim() : fallback
 /** A team is a conversation between superagents: a group of several, or a direct conversation between two. */
 export type TeamKind = 'group' | 'direct'
 export interface Team {

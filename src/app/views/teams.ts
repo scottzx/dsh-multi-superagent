@@ -3,7 +3,7 @@ import type { Team, TeamMessage, TeamMessageKind, TeamTask, TeamTaskState } from
 import type { Store } from '../store.ts'
 
 /** A superagent identity as the panel shows it. */
-export interface SuperagentRow { id: string; name: string; role: string }
+export interface SuperagentRow { id: string; name: string; role: string; /** Its bound project directory, when the lead set one. */ directory?: string }
 /** A team's tasks by state, for the list row's counts. */
 export interface TeamCounts { proposed: number; waiting: number; working: number; done: number; failed: number }
 /** A team as the panel lists it. */
@@ -44,7 +44,7 @@ const name = (store: Store, id: string): string => store.team.superagents.get(id
 function summary(store: Store, team: Team): TeamSummary {
   const counts: TeamCounts = { proposed: 0, waiting: 0, working: 0, done: 0, failed: 0 }
   for (const task of store.team.tasks.list(team.id)) counts[task.state]++
-  return { id: team.id, name: team.name, kind: team.kind, members: team.memberIds.map(id => ({ id, name: name(store, id), role: store.team.superagents.get(id)?.role ?? 'specialist' })),
+  return { id: team.id, name: team.name, kind: team.kind, members: team.memberIds.map(id => ({ id, name: name(store, id), role: store.team.superagents.get(id)?.role ?? 'specialist', directory: store.team.superagents.get(id)?.directory || undefined })),
     ...team.leadId ? { leadId: team.leadId } : {}, ...team.closed ? { closed: team.closed } : {}, counts }
 }
 
