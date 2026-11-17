@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { ApiError, caller, usePoll } from '../src/client/api.ts'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
+import { keepMark, presenceOf, presenceStore } from '../src/client/presence.ts'
 import { SettingsSchema } from '../src/policy.ts'
 
 declare global { var IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -43,15 +44,27 @@ const openMaster = async (container: HTMLElement) => {
 const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
   const path = new URL(url, 'http://127.0.0.1').pathname.replace('/orchestrator/api/', '')
   if (path === 'overview') return Response.json({ problems: [], person: [], executor: { running: 0, queued: 0, maxWorkers: 3, idle: 0 }, flow: { triggers: 0, filtered: 0, judged: 0, accepted: 0, evaluating: 0 }, policyVersion: 'v' })
-  if (path === 'state') return Response.json({ masterId: 'master', settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
+  if (path === 'state') return Response.json({ masterId: 'master', superagents: [], settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
     setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
   return Response.json({ error: 'unavailable' }, { status: 503 })
 }))
 afterEach(() => { vi.unstubAllGlobals() })
 
+it('keeps done until the conversation is opened, and a request outranks work', () => {
+  const memory = new Map<string, string>()
+  presenceStore({ get: key => memory.get(key) ?? null, set: (key, value) => { memory.set(key, value) } })
+  expect(presenceOf({ request: true, running: true, open: false, marked: false })).toBe('request')
+  expect(presenceOf({ request: false, running: true, open: false, marked: false })).toBe('working')
+  expect(keepMark(false, true, false)).toBe(true)
+  expect(presenceOf({ request: false, running: false, open: false, marked: true })).toBe('done')
+  expect(presenceOf({ request: false, running: false, open: true, marked: true })).toBe('idle')
+  expect(keepMark(true, false, true)).toBe(false)
+  presenceStore(undefined)
+})
+
 it('registers a localized main panel, sidebar entry and Plugin Manager row page, and no settings section', () => {
   const { entries, dictionaries, main, nav } = fixture([])
-  expect(entries.map(entry => entry.options.name)).toEqual(['main', 'sidebar.panellist', 'plugins.row.config'])
+  expect(entries.map(entry => entry.options.name)).toEqual(['main', 'sidebar.panellist', 'plugins.row.config', 'sidebar.workspaces'])
   expect(entries[2]!.options).toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
   expect(Object.keys(dictionaries)).toEqual(['dshSuperagent'])
   expect(main.options).toMatchObject({ key: 'dsh-superagent', locale: 'dshSuperagent' })

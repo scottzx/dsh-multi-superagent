@@ -4,9 +4,9 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
-import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
-  from '../core/index.ts'
+import { key, latestAssignment, latestReport, liveTicket, runningAssignment, superagentWorkspace, threadKey, waitsForPerson } from '../core/index.ts'
+import type { AssessmentOutcome, Assignment, EngineForExecutor, EngineForSuperagentRunner, Execution, Executor, Mandate, PolicyEffect,
+  SuperagentRunner, Team, TeamMessage, TeamTask, Ticket, TicketInput, Trigger } from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
@@ -24,6 +24,18 @@ const now = (): string => new Date().toISOString()
 export const workerSessionId = (ticketId: string): string => `worker-${ticketId}`
 /** Returns the ticket ID for a worker session ID (`worker-<ticketId>`), or undefined for non-worker sessions. */
 export const ticketOfSession = (sessionId: string): string | undefined => sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
+/** Returns the superagent session ID (`superagent-<superagentId>`) for a superagent identity. */
+export const superagentSessionId = (superagentId: string): string => `superagent-${superagentId}`
+/** Returns the superagent ID for a superagent session ID (`superagent-<superagentId>`), or undefined for other sessions. */
+export const superagentOfSession = (sessionId: string): string | undefined => sessionId.startsWith('superagent-') ? sessionId.slice('superagent-'.length) : undefined
+/** Builds the first message of a superagent's turn: its task, the team's talk, and the other tasks' reports. */
+export function superagentTaskMessage(team: Team, task: TeamTask, messages: TeamMessage[], others: TeamTask[]): string {
+  const talk = messages.filter(message => message.from !== task.assigneeId).slice(-12)
+  const reports = others.filter(item => item.state === 'done' || item.state === 'failed').map(item => `**${item.assigneeId}**: ${item.report ?? item.reason ?? item.state}`)
+  return JSON.stringify({ team_id: team.id, team_name: team.name, task_id: task.id, assignee_id: task.assigneeId, task: task.text,
+    outputs: task.outputs, after: task.after, ...talk.length ? { talk: talk.map(message => `${message.from}: ${message.text}`) } : {},
+    ...reports.length ? { reports } : {} })
+}
 /** Maximum runtime for a workspace prepare command. */
 const PREPARE_TIMEOUT_MS = 10 * 60_000
 /** Maximum transient retry attempts for a launch or worker turn, and the initial backoff before resuming a turn. */
@@ -108,6 +120,11 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
   return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+}
+/** Builds a delegated ticket's Execution metadata from the worktree name its specialist chose. */
+export function delegatedExecution(ticket: Ticket, delegation: { name: string }, settings: Settings, stateDir: string): Execution {
+  const name = ticketWorktreeName(delegation.name, ticket.id)
+  return { name, directory: join(executionRoot(settings, stateDir), name), assignment: '' }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -237,6 +254,10 @@ export class DshExecutor implements Executor {
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
     return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
+  }
+  /** Populates a delegated ticket's `execution` attributes from the worktree name its specialist chose. */
+  prepareDelegated(ticket: Ticket, delegation: { name: string }): Ticket {
+    return { ...ticket, execution: delegatedExecution(ticket, delegation, this.host.store.settings(), this.host.machine.stateDir) }
   }
   /**
    * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's
@@ -670,4 +691,132 @@ export class DshExecutor implements Executor {
       }
     })
   }
+}
+
+/** Host dependencies used by the superagent runner. */
+export interface SuperagentRunnerHost {
+  /** DSH Cordis context: agents and their events. */
+  readonly context: Context
+  /** Where the runner reports what happened to superagent turns. */
+  readonly engine: EngineForSuperagentRunner
+  readonly store: Pick<Store, 'team' | 'atomic' | 'afterCommit'>
+  /** Durable effect queue through which superagent launches and deliveries run. */
+  readonly effects: Pick<Effects, 'enqueue' | 'handle'>
+  /** Session manager for superagent Sessions. */
+  readonly sessions: Pick<Sessions, 'ensure' | 'prompt'>
+  readonly machine: Pick<Machine, 'stateDir'>
+  readonly lifetime: AbortSignal
+  closing(): boolean
+  /** Whether processing is paused, which holds superagent launches and deliveries. */
+  paused(): boolean
+}
+
+/**
+ * Runs superagent turns: one Session per superagent, launched, delivered to and stopped like an Assignment. A turn's first
+ * message carries its task, the team's talk and the other tasks' reports; later team messages are delivered to the running
+ * turn. A turn that ends without a report is recorded ended, and a task's end cancels its Session. `Runtime` constructs it,
+ * passes it to the `Engine` as the `SuperagentRunner` port, and starts and stops it with the rest of the executor.
+ */
+export class SuperagentRunnerImpl implements SuperagentRunner {
+  private readonly disposers: (() => void)[] = []
+  constructor(private readonly host: SuperagentRunnerHost) {
+    host.effects.handle('superagent-launch', payload => this.launch(payload), { limit: () => host.paused() ? 0 : 4, retry: [5000, 300_000] })
+    host.effects.handle('superagent-delivery', payload => this.deliverTurn(payload), { limit: () => host.paused() ? 0 : 4, retry: [2000, 60_000], quiet: true })
+  }
+  /** Enqueues a `superagent-launch` effect to start a superagent's turn on a team task. */
+  start(team: Team, task: TeamTask): void { this.host.effects.enqueue('superagent-launch', task.id, { teamId: team.id, taskId: task.id }) }
+  /** Enqueues a `superagent-delivery` effect to steer a team's new messages into a running superagent turn. */
+  deliver(team: Team, task: TeamTask): void { this.host.effects.enqueue('superagent-delivery', task.id, { teamId: team.id, taskId: task.id }) }
+  /**
+   * Delivers a team's message to a member with no working task, so talk does not wait for a dispatched task. The message is
+   * already on the team record; this only wakes the member's Session to read it.
+   */
+  talk(team: Team, memberId: string, message: TeamMessage): void {
+    this.host.effects.enqueue('superagent-delivery', `talk:${memberId}:${message.id}`, { teamId: team.id, taskId: message.id, memberId })
+  }
+  /** Cancels a superagent turn; the task's end has already been recorded in the domain. */
+  stop(team: Team, task: TeamTask, _reason: string): void {
+    this.host.store.afterCommit(() => {
+      if (task.turn?.state === 'ended') return
+      this.host.context.agents.get(superagentSessionId(task.assigneeId) as SessionId)?.cancel({ kind: 'user' }, { keepInbox: false })
+    })
+  }
+  private async launch({ teamId, taskId }: { teamId: string; taskId: string }): Promise<void> {
+    if (this.host.closing() || this.host.paused()) throw new Later('Processing is paused')
+    const team = this.host.store.team.teams.get(teamId)
+    const task = team && this.host.store.team.tasks.get(taskId)
+    if (!team || !task || task.teamId !== teamId || task.state !== 'working' || !task.turn || task.turn.state !== 'pending') return
+    const sessionId = superagentSessionId(task.assigneeId)
+    // The superagent's own project directory when the lead bound one; otherwise the shared state directory.
+    const workspace = superagentWorkspace(this.host.store.team.superagents.get(task.assigneeId), this.host.machine.stateDir)
+    await this.host.sessions.ensure(sessionId, workspace, `${team.name} · ${task.assigneeId}`, 'superagent')
+    const messages = this.host.store.team.messages.list(teamId)
+    const others = this.host.store.team.tasks.list(teamId).filter(item => item.id !== task.id)
+    await this.host.sessions.prompt(sessionId, `superagent-task:${task.id}`, superagentTaskMessage(team, task, messages, others), 'queue',
+      () => { if (!this.alive(teamId, taskId)) throw new Error('The task ended before its superagent launch') })
+    this.host.engine.superagentStarted(teamId, taskId)
+    this.host.engine.superagentDelivered(teamId, taskId)
+  }
+  private async deliverTurn({ teamId, taskId, memberId }: { teamId: string; taskId: string; memberId?: string }): Promise<void> {
+    // Talk to a member with no working task: wake its Session with the one message, which starts no task.
+    if (memberId) return this.deliverTalk(teamId, memberId, taskId)
+    const team = this.host.store.team.teams.get(teamId)
+    const task = team && this.host.store.team.tasks.get(taskId)
+    if (!team || !task || task.teamId !== teamId || !task.turn || task.turn.state === 'ended') return
+    const delivered = task.turn.deliveredAt
+    const messages = this.host.store.team.messages.list(teamId).filter(message => !delivered || message.at > delivered)
+    if (!messages.length) return
+    const sessionId = superagentSessionId(task.assigneeId)
+    // A superagent keeps its bound project directory across deliveries, or the shared state directory when unbound.
+    const workspace = superagentWorkspace(this.host.store.team.superagents.get(task.assigneeId), this.host.machine.stateDir)
+    if (!this.host.context.agents.get(sessionId as SessionId)) await this.host.sessions.ensure(sessionId, workspace, `${team.name} · ${task.assigneeId}`, 'superagent')
+    await this.host.sessions.prompt(sessionId, `superagent-deliver:${task.id}:${messages.at(-1)!.id}`,
+      messages.map(message => `${message.from}: ${message.text}`).join('\n'), 'steer')
+    this.host.engine.superagentDelivered(teamId, taskId)
+  }
+  /** Wake an idle member's Session with one team message. A member that has since taken a task reads it with that task. */
+  private async deliverTalk(teamId: string, memberId: string, messageId: string): Promise<void> {
+    const team = this.host.store.team.teams.get(teamId)
+    const message = team && this.host.store.team.messages.get(messageId)
+    if (!team || !message || message.teamId !== teamId || !team.memberIds.includes(memberId)) return
+    const busy = this.host.store.team.tasks.list(teamId).some(task => task.assigneeId === memberId && task.state === 'working'
+      && task.turn && task.turn.state !== 'ended')
+    if (busy) return
+    const sessionId = superagentSessionId(memberId)
+    const workspace = superagentWorkspace(this.host.store.team.superagents.get(memberId), this.host.machine.stateDir)
+    if (!this.host.context.agents.get(sessionId as SessionId)) await this.host.sessions.ensure(sessionId, workspace, `${team.name} · ${memberId}`, 'superagent')
+    await this.host.sessions.prompt(sessionId, `superagent-talk:${message.id}`,
+      JSON.stringify({ team_id: team.id, team_name: team.name, kind: 'team_message', from: message.from, text: message.text,
+        note: 'This is talk, not a dispatched task. Answer with superagent_team_message; do not report a task.' }), 'steer')
+  }
+  private alive(teamId: string, taskId: string): boolean {
+    const task = this.host.store.team.tasks.get(taskId)
+    return !!task && task.teamId === teamId && task.state === 'working' && !!task.turn && task.turn.state !== 'ended'
+  }
+  /** Ends a superagent turn whose Session went idle without a report. */
+  private idle(superagentId: string): void {
+    for (const team of this.host.store.team.teams.list()) {
+      const task = this.host.store.team.tasks.list(team.id).find(item => item.assigneeId === superagentId && item.state === 'working'
+        && item.turn && item.turn.state !== 'ended')
+      if (task) { this.host.engine.superagentTurnEnded(team.id, task.id); return }
+    }
+  }
+  /** Subscribes to host agent events so an idle superagent turn is recorded. Call once at startup. */
+  install(): void {
+    const ctx = this.host.context
+    this.disposers.push(ctx.on('agent/status', ({ agent, status }) => {
+      const superagentId = superagentOfSession(agent.id)
+      if (superagentId === undefined) return
+      if (status === 'running') return
+      if (status !== 'idle' || this.host.lifetime.aborted || this.host.closing()) return
+      void Promise.resolve().then(() => this.idle(superagentId))
+    }))
+  }
+  /** Cancels every superagent Session that runs a task, keeping their inbox. */
+  async shutdown(): Promise<void> {
+    const ids = [...new Set(this.host.store.team.teams.list().flatMap(team => this.host.store.team.tasks.list(team.id).map(task => task.assigneeId)))]
+    for (const id of ids) this.host.context.agents.get(superagentSessionId(id) as SessionId)?.cancel({ kind: 'user' }, { keepInbox: true })
+  }
+  /** Unsubscribes from host agent events. */
+  dispose(): void { for (const dispose of this.disposers.splice(0)) dispose() }
 }

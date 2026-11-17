@@ -1,6 +1,6 @@
 /** Ports the core depends on. Sources, policies, assessors, executors, and channels are project-specific. */
-import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Strength, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger }
-  from './model.ts'
+import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Superagent, Strength, Team, TeamMessage, TeamTask, Thread,
+  Ticket, TicketEndBy, TicketOutcome, Trigger } from './model.ts'
 import type { Reason } from './reasons.ts'
 
 /** Gate admission result: either inadmissible with a reason code, or admissible with strength and MandateBasis. */
@@ -68,6 +68,24 @@ export interface Executor {
   stop(ticket: Ticket, assignment: Assignment, reason: string): void
 }
 
+/**
+ * Runs superagent turns: one Session per superagent, launched, delivered to and stopped like an Assignment. The Engine
+ * calls these methods inside its commands, so each method only queues work, which reports back through the Engine's callbacks.
+ */
+export interface SuperagentRunner {
+  /** Queue a pending task's superagent turn for launch; reports back through `Engine.superagentStarted` or a failed report. */
+  start(team: Team, task: TeamTask): void
+  /** Queue delivery of a team's messages to a running superagent turn; reports back through `Engine.superagentDelivered` or a failure. */
+  deliver(team: Team, task: TeamTask): void
+  /** End a superagent turn's work, such as cancelling its Session's turn; called after the task has already ended in the domain. */
+  stop(team: Team, task: TeamTask, reason: string): void
+  /**
+   * Deliver a team's message to a member who has no working task, so talk does not wait for a dispatched task. Optional: a
+   * runner that has none leaves an idle member's messages in the team record, which its next turn reads.
+   */
+  talk?(team: Team, memberId: string, message: TeamMessage): void
+}
+
 /** A message for a Channel; `ticketId` names the Ticket it is for, when there is one. */
 export interface OutboundMessage { id: string; channel: ChannelRef; text: string; kind: 'acknowledgement' | 'reply' | 'notice'; ticketId?: string }
 /** A queued message waits (`pending`), went out (`sent`), or was dropped because its conversation can never receive it (`dropped`). */
@@ -99,6 +117,24 @@ export interface DomainEvents {
   /** A person's follow-up that reached tickets and that an earlier version also queued for Eval left the queue. */
   'trigger.followup': { triggerId: string }
   'policy.changed': { from: string; to: string }
+  /** A superagent identity was added to the domain. */
+  'superagent.added': { superagentId: string }
+  /** A team conversation was created. */
+  'team.created': { teamId: string }
+  /** A message was recorded on a team. */
+  'team.message': { messageId: string; teamId: string }
+  /** A team's tasks were proposed, before any of them is dispatched. */
+  'team.tasks.proposed': { teamId: string; taskIds: string[] }
+  /** A team task's superagent turn started. */
+  'team.task.dispatched': { teamId: string; taskId: string }
+  /** A team task's assignee reported it done. */
+  'team.task.done': { teamId: string; taskId: string }
+  /** A team task failed, for `reason`. */
+  'team.task.failed': { teamId: string; taskId: string; reason: string }
+  /** A team round was closed by its lead. */
+  'team.closed': { teamId: string; by: string }
+  /** A superagent's persona, skills, directory or disabled state changed. */
+  'superagent.updated': { superagentId: string }
 }
 export type DomainEvent = { [K in keyof DomainEvents]: { type: K; at: string; data: DomainEvents[K] } }[keyof DomainEvents]
 
@@ -130,5 +166,12 @@ export interface Repositories {
     get(id: string): Decision | undefined
     save(decision: Decision): void
     byThread(key: string): Decision[]
+  }
+  /** Superagent identities, team conversations, their messages and their tasks. */
+  team: {
+    superagents: { get(id: string): Superagent | undefined; save(value: Superagent): void; list(): Superagent[] }
+    teams: { get(id: string): Team | undefined; save(value: Team): void; list(): Team[] }
+    messages: { get(id: string): TeamMessage | undefined; save(value: TeamMessage): void; list(teamId: string): TeamMessage[] }
+    tasks: { get(id: string): TeamTask | undefined; save(value: TeamTask): void; list(teamId: string): TeamTask[] }
   }
 }

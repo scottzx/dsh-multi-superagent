@@ -1,5 +1,5 @@
 /** Browser plugin entry point registering the sidebar icon, main management panel, and Plugin Manager config view. */
-import { useCallback, useEffect, useRef } from 'react'
+import { Component, useCallback, useEffect, useRef, type ReactNode } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SidebarPanelIconOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -10,13 +10,17 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { PluginConfigViewProps } from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { StatusSource } from './roster.tsx'
 import { openKnownSession, SessionNavigationError } from '../navigation.ts'
 import { App } from './app.tsx'
 import { PluginConfig, usePageForm } from './deployment.tsx'
 import { en, zh } from './locales.ts'
+import { Roster } from './roster.tsx'
+import { PanelProvider } from './provider.tsx'
+import rosterStyles from './roster.css?raw'
 import type { T } from './text.ts'
 
-type ClientContext = Context & { sessions: ISessions }
+type ClientContext = Context & { sessions: ISessions; get?(name: string): unknown }
 const NS = 'dshSuperagent'
 const PANEL_ID = 'dsh-superagent' as MainPanelId
 const ENTRY = 'dsh-superagent'
@@ -55,4 +59,28 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => t('panel'), locale: NS }, HammerIcon))
   ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: `${ENTRY}#${ENTRY}`, locale: NS },
     (props: PluginConfigViewProps & { t: T }) => <PluginConfig t={props.t} view={props.view} form={props.form} />))
+  // The shipped session browser registers first at the default priority and keeps the seat.
+  // A lower priority sorts first and replaces it. A throw still falls back to that list.
+  ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register({ name: 'sidebar.workspaces', priority: -1_000_000 },
+    (props: { wide?: boolean }) => <RosterBoundary>
+      <PanelProvider t={t} openSession={id => openKnownSession(ctx.sessions, id as SessionId,
+        target => { ctx.uiWorkspace.openSession(target) }, new AbortController().signal)}>
+        <style>{rosterStyles}</style>
+        <Roster wide={props.wide !== false} sessions={ctx.sessions} status={sessionStatus(ctx)} openTeam={() => selectPanel(ctx)} />
+      </PanelProvider>
+    </RosterBoundary>))
+}
+
+function sessionStatus(ctx: ClientContext): StatusSource | undefined {
+  return (ctx.get?.('uiSession') as { sessionStatus?: StatusSource } | undefined)?.sessionStatus
+}
+function selectPanel(ctx: ClientContext): void {
+  (ctx.get?.('layout') as { selectPanel?: (id: MainPanelId) => void } | undefined)?.selectPanel?.(PANEL_ID)
+}
+
+/** Keeps a roster failure in the sidebar instead of handing the seat back to the session list. */
+class RosterBoundary extends Component<{ children: ReactNode }, { error?: string }> {
+  state: { error?: string } = {}
+  static getDerivedStateFromError(error: unknown) { return { error: error instanceof Error ? error.message : String(error) } }
+  render() { return this.state.error ? <p className="dt-roster-empty">{this.state.error}</p> : this.props.children }
 }

@@ -1,0 +1,18 @@
+.dt-roster { box-sizing: border-box; display: flex; flex-direction: column; gap: 2px; min-height: 0; height: 100%; overflow: auto; padding: 8px; color: var(--dsw-alias-label-primary); }
+.dt-roster-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px 8px; font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-tertiary); }
+.dt-roster-add { border: 0; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.dt-roster-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dt-roster-row { box-sizing: border-box; width: 100%; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 8px; background: none; padding: 6px 8px; text-align: left; color: inherit; cursor: pointer; }
+.dt-roster-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dt-roster-row:disabled { cursor: default; opacity: 0.5; }
+.dt-roster-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dt-roster-name { font-size: 13px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dt-roster-role { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dt-roster-empty { margin: 0; padding: 8px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
+.dt-roster-rail { align-items: center; padding-top: 12px; }
+.dt-roster-mark { border: 0; background: none; padding: 0; cursor: pointer; }
+.dt-roster-avatar { position: relative; width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: 8px; color: #fff; font-size: 13px; line-height: 1; font-weight: 600; }
+.dt-roster-presence { position: absolute; right: -2px; bottom: -2px; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--dsw-alias-bg-base, #fff); background: var(--dsw-alias-label-quaternary, #c5c5c5); }
+.dt-roster-presence[data-state='request'] { background: var(--dsw-alias-state-warn-primary, #c47b12); }
+.dt-roster-presence[data-state='working'] { background: var(--dsw-alias-brand-primary, #2f6feb); }
+.dt-roster-presence[data-state='done'] { background: var(--dsw-alias-state-success-primary, #1f8a4c); }

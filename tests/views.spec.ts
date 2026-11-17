@@ -11,6 +11,7 @@ import { snapshot, threadSummary, ticketSummary, triggerView } from '../src/app/
 import { basisFacts, ticketDetail } from '../src/app/views/tickets.ts'
 import { threadDetail } from '../src/app/views/threads.ts'
 import { droppedReplies, sourcesStatus } from '../src/app/views/sources.ts'
+import { teamDetail, teamList } from '../src/app/views/teams.ts'
 import { overview } from '../src/app/views/overview.ts'
 import { markdown, plain } from '../src/app/views/text.ts'
 import { policyHistory } from '../src/app/settings-history.ts'
@@ -65,6 +66,21 @@ const live = (id: string) => store.tickets.save({ id, title: id, decisionId: 'd'
   origin: { triggerId: 'e0', triggerIds: ['e0'] }, assignments: [], inputs: [] })
 const message = (id: string, actor: { source: string; id: string }, human = true) => ({ id, source: actor.source,
   threads: [{ source: 'feishu', id: 'oc_1:om_root' }], actor, human, at, text: `message ${id}`, meta: {} })
+
+it("carries each member's bound project directory into the team list and detail views", () => {
+  store.team.superagents.save({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+  store.team.superagents.save({ id: 'a', name: 'A', role: 'specialist', directory: '/srv/copy', createdAt: '' })
+  store.team.superagents.save({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
+  store.team.teams.save({ id: 't1', name: 't1', kind: 'group', memberIds: ['lead', 'a', 'b'], leadId: 'lead', createdAt: '' })
+  // A bound directory is shown; an unset one is left off the row.
+  expect(teamList(store).teams[0]!.members).toEqual([
+    { id: 'lead', name: 'Lead', role: 'lead' },
+    { id: 'a', name: 'A', role: 'specialist', directory: '/srv/copy' },
+    { id: 'b', name: 'B', role: 'specialist' },
+  ])
+  expect(teamDetail(store, 't1')!.team.members.find(member => member.id === 'a')?.directory).toBe('/srv/copy')
+  expect(teamDetail(store, 't1')!.team.members.find(member => member.id === 'b')?.directory).toBeUndefined()
+})
 
 it('names each sender as the Policy lists it, by its id where the id is readable, and as its kind names one it does not list', () => {
   const view = snapshot(views())

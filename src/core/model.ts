@@ -120,7 +120,15 @@ export type MandateBasis = Received & { sender?: string; rules?: string[] } & (
   | { via: 'listed'; addressed?: 'mention' | 'direct'; observation?: { mode?: AcceptMode }; authority?: string }
   /** A message of a bot on its Source's bot list: an inferred candidate at most, never an explicit request or a stop. */
   | { via: 'bot'; addressed?: 'mention' | 'direct'; observation: { mode: AcceptMode } }
+  /**
+   * A mandate a team's lead grants to a specialist's delegation for a Ticket the specialist creates. Revalidated by
+   * whether the team is open and the task belongs to it; it does not depend on the admission table, because the lead,
+   * not a Source sender, granted it.
+   */
+  | TeamMandateBasis
 )
+/** A mandate granted by a team's lead to a specialist's delegation, naming the team, its task and the lead. */
+export type TeamMandateBasis = Received & { via: 'team'; team: string; task: string; lead: ActorRef }
 
 /** Immutable authorization produced by an accept decision; execution is bounded by it and it never changes. */
 export interface Mandate {
@@ -313,6 +321,95 @@ export interface Ticket {
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
 export interface Execution { name: string; directory: string; assignment: string }
+
+/** A superagent is a first-class agent identity in the domain: the lead, or a professional superagent. */
+export type SuperagentRole = 'lead' | 'specialist'
+export interface Superagent {
+  id: string
+  name: string
+  role: SuperagentRole
+  /** Capabilities are prompt text the lead uses to divide work; the core does not interpret them. */
+  capabilities?: string[]
+  /**
+   * Who this superagent is, in its own words: role, method and what it delivers. Injected into its Session's system
+   * prompt; the core does not interpret it. Absent means the shared superagent prompt is all it has.
+   */
+  persona?: string
+  /** Skill names bound to this superagent, registered on its Session in addition to the deployment's skills. */
+  skills?: string[]
+  /** A person or the lead paused this superagent: it keeps its identity, but starts no turn and receives no message. */
+  disabled?: { at: string; by: string }
+  /**
+   * The project directory this superagent's Session runs in, when the lead bound one to it. One directory may host one
+   * superagent, so a specialist can be pointed at its own checkout or module. Optional: when it is absent (or blank),
+   * the runner falls back to the machine's state directory.
+   */
+  directory?: string
+  createdAt: string
+}
+/** Whether a superagent may take a turn or a message: it has not been disabled. */
+export const superagentActive = (superagent: Pick<Superagent, 'disabled'>): boolean => !superagent.disabled
+/** The directory a superagent's Session runs in: its bound project directory, or `fallback` when it has none. */
+export const superagentWorkspace = (superagent: Superagent | undefined, fallback: string): string =>
+  superagent?.directory?.trim() ? superagent.directory.trim() : fallback
+/** A team is a conversation between superagents: a group of several, or a direct conversation between two. */
+export type TeamKind = 'group' | 'direct'
+export interface Team {
+  id: string
+  name: string
+  kind: TeamKind
+  memberIds: string[]
+  /** The member who proposes the division and closes the round; a direct team has none. */
+  leadId?: string
+  createdAt: string
+  closed?: { at: string; by: string; summary: string }
+}
+/** What a team message says: a discussion line, a proposed or dispatched task, a report, a closing decision, or a notice. */
+export type TeamMessageKind = 'discussion' | 'task' | 'report' | 'decision' | 'notice'
+export interface TeamMessage {
+  id: string
+  teamId: string
+  from: string
+  text: string
+  at: string
+  kind: TeamMessageKind
+  /** The task a `task` or `report` message carries. */
+  taskId?: string
+  /** The candidate or request a message refers to, when one exists. */
+  triggerId?: string
+}
+/** A superagent's turn on a team task, shaped like an Assignment. */
+export interface SuperagentTurn {
+  id: string
+  state: 'pending' | 'running' | 'ended'
+  createdAt: string
+  startedAt?: string
+  /** When the turn's first message reached the superagent's Session, from which its deadline counts. */
+  deliveredAt?: string
+  endedAt?: string
+  report?: { state: 'done' | 'failed' | 'waiting'; summary: string; at: string }
+}
+/** The state of a team task, as the dispatch state machine in docs/009 moves it. */
+export type TeamTaskState = 'proposed' | 'waiting' | 'working' | 'done' | 'failed'
+export interface TeamTask {
+  id: string
+  teamId: string
+  assigneeId: string
+  text: string
+  state: TeamTaskState
+  /** The members whose tasks this one waits on; it orders work and never routes. */
+  after: string[]
+  /** The deliverable paths a task declares, checked before it is treated as done. */
+  outputs: string[]
+  /** The assignee's report on a done or failed task. */
+  report?: string
+  reason?: string
+  createdAt: string
+  updatedAt?: string
+  turn?: SuperagentTurn
+}
+/** Whether a team is open: it has not been closed. */
+export const openTeam = (team: Pick<Team, 'closed'>): boolean => !team.closed
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended
