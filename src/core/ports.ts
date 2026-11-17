@@ -79,6 +79,11 @@ export interface SuperagentRunner {
   deliver(team: Team, task: TeamTask): void
   /** End a superagent turn's work, such as cancelling its Session's turn; called after the task has already ended in the domain. */
   stop(team: Team, task: TeamTask, reason: string): void
+  /**
+   * Deliver a team's message to a member who has no working task, so talk does not wait for a dispatched task. Optional: a
+   * runner that has none leaves an idle member's messages in the team record, which its next turn reads.
+   */
+  talk?(team: Team, memberId: string, message: TeamMessage): void
 }
 
 /** A message for a Channel; `ticketId` names the Ticket it is for, when there is one. */
@@ -128,6 +133,8 @@ export interface DomainEvents {
   'team.task.failed': { teamId: string; taskId: string; reason: string }
   /** A team round was closed by its lead. */
   'team.closed': { teamId: string; by: string }
+  /** A superagent's persona, skills, directory or disabled state changed. */
+  'superagent.updated': { superagentId: string }
 }
 export type DomainEvent = { [K in keyof DomainEvents]: { type: K; at: string; data: DomainEvents[K] } }[keyof DomainEvents]
 

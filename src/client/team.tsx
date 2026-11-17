@@ -1,8 +1,8 @@
 /** Team page: the list of team conversations, a team's tasks and messages, and closing a round. */
 import { useState } from 'react'
-import type { TeamDetailView, TeamListView } from '../app/views/teams.ts'
+import type { SuperagentRow, TeamDetailView, TeamListView } from '../app/views/teams.ts'
 import { usePoll } from './api.ts'
-import { Button, Icon, Modal, Tag } from './controls.tsx'
+import { Button, Icon, Input, Modal, Tag } from './controls.tsx'
 import { useAction, usePanel } from './provider.tsx'
 import { MarkdownLite, PageHead, Section, StageMark, When } from './widgets.tsx'
 
@@ -76,6 +76,21 @@ function TeamMessageLine({ message }: { message: TeamDetailView['messages'][numb
   </li>
 }
 
+function Talk({ teamId }: { teamId: string }) {
+  const { t, call, notify } = usePanel()
+  const [text, setText] = useState('')
+  const run = useAction(async () => { await call('POST teams/:id/message', { id: teamId, body: { text } }) })
+  const submit = () => {
+    if (!text.trim()) { notify(t('teamMessageRequired')); return }
+    void run.run().then(done => { if (done) { setText(''); notify(t('teamMessageSent')) } })
+  }
+  return <Section title={t('teamMessage')} hint={t('teamMessageHint')}>
+    <textarea className="dt-textarea" rows={3} maxLength={4000} value={text} spellCheck={false}
+      aria-label={t('teamMessage')} onChange={event => setText(event.target.value)} />
+    <div className="dt-subhead-actions"><Button variant="primary" size="sm" disabled={run.busy} onClick={submit}>{t('teamMessage')}</Button></div>
+  </Section>
+}
+
 function CloseTeam({ teamId, onClosed }: { teamId: string; onClosed: () => void }) {
   const { t, call, notify } = usePanel()
   const [open, setOpen] = useState(false)
@@ -97,6 +112,45 @@ function CloseTeam({ teamId, onClosed }: { teamId: string; onClosed: () => void 
   </>
 }
 
+function Roster() {
+  const { t, call } = usePanel()
+  const list = usePoll(() => call('GET superagents'), [])
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState({ id: '', name: '', persona: '', capabilities: '' })
+  const create = useAction(async () => {
+    await call('POST superagents', { body: { id: draft.id.trim(), name: draft.name.trim(),
+      ...draft.persona.trim() ? { persona: draft.persona.trim() } : {},
+      ...draft.capabilities.trim() ? { capabilities: draft.capabilities.split(',').map(item => item.trim()).filter(Boolean) } : {} } })
+  }, { reload: async () => { list.reload() } })
+  const toggle = useAction(async (member: SuperagentRow) => {
+    await call('POST superagents/:id', { id: member.id, body: { disabled: !member.disabled } })
+  }, { reload: async () => { list.reload() } })
+  if (!list.data) return null
+  const members = (list.data as { superagents: SuperagentRow[] }).superagents
+  return <Section title={t('superagentsTitle')} count={members.length}
+    action={<Button variant="outline" size="sm" onClick={() => setOpen(true)}>{t('superagentCreate')}</Button>}>
+    {members.length ? <ul className="dt-list dt-cards">{members.map(member => <li key={member.id} className="dt-row dt-ticket" data-state={member.disabled ? 'idle' : 'ongoing'}>
+      <div className="dt-ticket-body">
+        <div className="dt-row-title">{member.name}{member.disabled && <Tag tone="quiet">{t('superagentDisabled')}</Tag>}</div>
+        <div className="dt-row-meta dt-line">
+          {member.capabilities && <span>{member.capabilities.join(t('listSeparator'))}</span>}
+          {member.persona && <span className="dt-line-text">{member.persona}</span>}
+          <Button variant="ghost" size="sm" disabled={toggle.busy} onClick={() => { void toggle.run(member) }}>
+            {member.disabled ? t('superagentEnable') : t('superagentDisable')}</Button>
+        </div>
+      </div>
+    </li>)}</ul> : <p className="dt-hint">{t('superagentsNone')}</p>}
+    <Modal open={open} onClose={() => setOpen(false)} title={t('superagentCreate')} closeLabel={t('close')}
+      footer={<><Button variant="ghost" onClick={() => setOpen(false)}>{t('cancel')}</Button>
+        <Button variant="primary" disabled={create.busy} onClick={() => { void create.run().then(done => { if (done) setOpen(false) }) }}>{t('superagentSave')}</Button></>}>
+      <label className="dt-field">{t('superagentId')}<Input value={draft.id} onChange={event => setDraft({ ...draft, id: event.target.value })} /></label>
+      <label className="dt-field">{t('superagentName')}<Input value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
+      <label className="dt-field">{t('superagentCapabilities')}<Input value={draft.capabilities} onChange={event => setDraft({ ...draft, capabilities: event.target.value })} /></label>
+      <label className="dt-field">{t('superagentPersona')}<textarea className="dt-textarea" rows={4} value={draft.persona} onChange={event => setDraft({ ...draft, persona: event.target.value })} /></label>
+    </Modal>
+  </Section>
+}
+
 /** The team tab: a list of team conversations, or one team's tasks and messages when a team is open. */
 export function TeamPage({ id }: { id?: string }) {
   const { t, call, navigate } = usePanel()
@@ -105,10 +159,10 @@ export function TeamPage({ id }: { id?: string }) {
   if (id === undefined) {
     if (!list.data) return <p className="dt-error" role="alert">{list.error?.message ?? t('loading')}</p>
     const data = list.data as TeamListView
-    return <Section title={t('teamsTitle')} count={data.teams.length}>
+    return <><Roster /><Section title={t('teamsTitle')} count={data.teams.length}>
       {data.teams.length ? <ul className="dt-list dt-cards">{data.teams.map(team => <TeamLine key={team.id} team={team}
         onOpen={teamId => navigate({ page: 'team', id: teamId })} />)}</ul> : <p className="dt-hint">{t('teamsNone')}</p>}
-    </Section>
+    </Section></>
   }
   if (!detail.data) return <p className="dt-error" role="alert">{detail.error?.message ?? t('loading')}</p>
   const data = detail.data as TeamDetailView
@@ -135,5 +189,6 @@ export function TeamPage({ id }: { id?: string }) {
     <Section title={t('teamMessagesTitle')} count={data.messages.length}>
       <ul className="dt-list dt-cards">{data.messages.map(message => <TeamMessageLine key={message.id} message={message} />)}</ul>
     </Section>
+    {data.team.kind === 'direct' && !data.team.closed && <Talk teamId={id} />}
   </>
 }

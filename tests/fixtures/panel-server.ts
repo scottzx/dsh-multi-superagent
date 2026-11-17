@@ -110,6 +110,7 @@ export interface PanelServer {
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
   teams: ApiResponse<'GET teams'>; teamDetails: Record<string, ApiResponse<'GET teams/:id'>>
+  superagents: ApiResponse<'GET superagents'>
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
   requests: { path: string; method: string; body?: unknown }[]
@@ -178,7 +179,7 @@ function sourceStatuses(): SourceStatusRow[] {
 }
 const stateView = (): StateView => ({
   setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
-  masterId: 'master', paused: server.settings.paused,
+  masterId: 'master', paused: server.settings.paused, superagents: server.superagents.superagents,
   // The panel does not read health; the service script does.
   health: {},
 })
@@ -278,6 +279,7 @@ function initial(): PanelServer {
     tickets: { open: [ticketSummary()], ended: [ended] }, ticketDetails: { t1: ticketDetail() },
     threads: [threadSummary()], threadPages: threadPage,
     teams: teamListView(), teamDetails: { team1: teamDetailView() },
+    superagents: { superagents: TEAM_SUMMARY.members },
     person: [ticketSummary({ attention: { id: 'q1', question: '需要确认按钮颜色' }, note: { text: '需要确认按钮颜色', error: false }, reply },
       { stage: 'person', action: 'answer' }),
       ticketSummary({ id: 't4', title: '截图工具', actions: { retry: true, stop: true }, sessionId: 'worker-t4',
@@ -368,6 +370,21 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.teams = { teams: server.teams.teams.map(team => team.id === params.id ? { ...team,
       closed: { at: '2026-09-23T00:02:00Z', by: detail.team.leadId ?? '', summary: body.summary } } : team) }
     return { closed: true }
+  } },
+  'POST teams/:id/message': { body: true, answer: ({ params }) => server.teamDetails[params.id]
+    ? { message_id: `m-${params.id}` } : refuse(404, 'Team not found') },
+  'GET superagents': { answer: () => server.superagents },
+  'POST superagents': { body: true, answer: ({ body }) => {
+    server.superagents = { superagents: [...server.superagents.superagents, { id: body.id, name: body.name, role: 'specialist',
+      ...body.capabilities ? { capabilities: body.capabilities } : {}, ...body.persona ? { persona: body.persona } : {},
+      ...body.directory ? { directory: body.directory } : {} }] }
+    return { id: body.id }
+  } },
+  'POST superagents/:id': { body: true, answer: ({ params, body }) => {
+    server.superagents = { superagents: server.superagents.superagents.map(member => member.id === params.id
+      ? { ...member, ...body.name ? { name: body.name } : {}, ...body.disabled ? { disabled: { at: '2026-09-23T00:00:00Z', by: 'panel' } } : { disabled: undefined } }
+      : member) }
+    return { id: params.id }
   } },
   'POST executor/pause': { body: true, answer: ({ body }) => {
     server.settings = { ...server.settings, paused: body.paused }

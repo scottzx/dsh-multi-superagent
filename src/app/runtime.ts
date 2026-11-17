@@ -32,7 +32,7 @@ import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
-import { eventNotice, followupNotice } from './notices.ts'
+import { eventNotice, followupNotice, teamReportRelay } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
@@ -151,6 +151,14 @@ export class Runtime extends Service implements SourceHost {
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
           if (followup) sessions.relay(followup.id, followup.text)
+          // A specialist's report wakes the lead, as a worker report does: a notice would only inject and leave the round open.
+          const reported = !this.quiet && (event.type === 'team.task.done' || event.type === 'team.task.failed')
+            ? store.team.tasks.get(event.data.taskId) : undefined
+          const reportedTeam = reported ? store.team.teams.get(reported.teamId) : undefined
+          if (reported && reportedTeam && !reported.id.startsWith('team-talk')) {
+            const relay = teamReportRelay(reportedTeam, reported, store.team.tasks.list(reported.teamId))
+            sessions.relay(relay.id, relay.text)
+          }
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {

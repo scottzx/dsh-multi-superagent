@@ -1,6 +1,6 @@
 /** Formats background notices and steering relays delivered to the main Session via the effect queue. */
 import { randomUUID } from 'node:crypto'
-import { followupOwners, key, liveTicket, type DomainEvent, type Ticket, type WorkerReport } from '../core/index.ts'
+import { followupOwners, key, liveTicket, type DomainEvent, type Team, type TeamTask, type Ticket, type WorkerReport } from '../core/index.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { repliedTo } from './links.ts'
@@ -126,4 +126,20 @@ export function reportRelay(ticket: Ticket, report: Pick<WorkerReport, 'state' |
   }
   if (report.state === 'progress' && !report.answers) return undefined
   return resultRelay(ticket, report.state, report.summary, report.answers)
+}
+/**
+ * A specialist's task finished or failed: the lead is steered to a closing turn, as a worker report is. The key is the task
+ * and the outcome, so a retry of the same event delivers once and a later outcome of the same task still arrives. The lead
+ * reads the rest with `lead_team_read` or `lead_team_wait`, summarizes, and relays to the source; it does not start work.
+ */
+export function teamReportRelay(team: Pick<Team, 'id' | 'name'>, task: Pick<TeamTask, 'id' | 'assigneeId' | 'text' | 'state' | 'report' | 'reason' | 'outputs'>,
+  open: readonly Pick<TeamTask, 'state'>[]): Relay {
+  const remaining = open.filter(item => item.state === 'proposed' || item.state === 'waiting' || item.state === 'working').length
+  const summary = (task.report ?? task.reason ?? '').slice(0, 600)
+  const report = { kind: 'team_report', team_id: team.id, team_name: team.name, task_id: task.id, assignee_id: task.assigneeId,
+    task: task.text, state: task.state, ...summary ? { summary } : {}, ...task.outputs.length ? { outputs: task.outputs } : {},
+    remaining, read: `team/${team.id}`,
+    note: remaining ? 'Other tasks of this round are still open. Do not relay a partial result and do not close the round. A later team_report arrives when the next task finishes.'
+      : 'Every task of this round is done or failed. Now relay the result to the person who asked, then close the round with lead_team_close. Do not start more work in this turn.' }
+  return { id: `team-report:${task.id}:${task.state}`, text: JSON.stringify(report) }
 }

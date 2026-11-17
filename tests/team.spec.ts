@@ -17,6 +17,14 @@ function harness(superagent?: SuperagentRunner) {
   return { repo, engine, executor, runner }
 }
 
+/** The identity a lead tool writes as: the session when it is a member, otherwise the team's lead. */
+function voice(teamId: string, sessionId: string, engine: { team(id: string): Team | undefined }): string {
+  const found = engine.team(teamId)
+  if (!found) return sessionId
+  if (found.memberIds.includes(sessionId)) return sessionId
+  return found.leadId && found.memberIds.includes(found.leadId) ? found.leadId : sessionId
+}
+
 function team(id: string, memberIds: string[] = ['lead'], kind: Team['kind'] = 'group'): Team {
   return { id, name: id, kind, memberIds, ...kind === 'group' ? { leadId: memberIds[0] } : {}, createdAt: '2026-09-23T00:00:00.000Z' }
 }
@@ -132,6 +140,23 @@ describe('the team of superagents', () => {
     expect(() => engine.sendTeamMessage('t1', 'ghost', 'nope', 'discussion')).toThrow(UserError)
   })
 
+  it('lets the main session write as the team lead, and omits an absent reason from a dispatch', () => {
+    const { engine } = harness()
+    engine.addSuperagent({ id: 'chief', name: 'Chief', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
+    engine.addTeam(team('t1', ['chief', 'a']))
+    // The orchestrator session id is not a member. The tool records the line as the team's lead.
+    const from = voice('t1', 'orchestrator-14cd', engine)
+    expect(from).toBe('chief')
+    engine.sendTeamMessage('t1', from, 'hi', 'discussion')
+    expect(engine.messages('t1').at(-1)).toMatchObject({ from: 'chief', text: 'hi' })
+    engine.proposeTeam('t1', [{ assigneeId: 'a', text: 'do A' }])
+    const dispatched = engine.dispatchTeam('t1').map(task => ({ task_id: task.id, assignee_id: task.assigneeId, state: task.state,
+      ...task.reason ? { reason: task.reason } : {} }))
+    expect(JSON.stringify(dispatched)).not.toContain('undefined')
+    expect(dispatched[0]).toEqual({ task_id: expect.any(String), assignee_id: 'a', state: 'working' })
+  })
+
   it('routes a direct conversation to its running member only', () => {
     const { engine, runner } = harness()
     engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
@@ -159,6 +184,24 @@ describe('the team of superagents', () => {
     expect(decision.text).toBe('定：A 已完成')
     expect(() => engine.proposeTeam('t1', [{ assigneeId: 'a', text: 'more' }])).toThrow(UserError)
     expect(() => engine.closeTeam('t1', 'lead', 'again')).toThrow(UserError)
+  })
+
+  it('wakes an idle member for talk without starting a task', () => {
+    const talk = vi.fn()
+    const { engine } = harness({ start: vi.fn(), deliver: vi.fn(), stop: vi.fn(), talk })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', persona: 'You write the copy.', capabilities: ['copy'], createdAt: '' })
+    engine.addTeam(team('t1', ['lead', 'a']))
+    engine.sendTeamMessage('t1', 'lead', 'what do you think', 'discussion')
+    expect(talk).toHaveBeenCalledOnce()
+    expect(talk.mock.calls[0]![1]).toBe('a')
+    expect(engine.tasks('t1')).toEqual([])
+    // The lead is the main Session, so a reply does not start a superagent Session for it.
+    engine.sendTeamMessage('t1', 'a', 'back', 'discussion')
+    expect(talk).toHaveBeenCalledOnce()
+    engine.updateSuperagent('a', { disabled: { at: '2026-09-23T00:00:00.000Z', by: 'lead' } })
+    engine.sendTeamMessage('t1', 'lead', 'still there', 'discussion')
+    expect(talk).toHaveBeenCalledOnce()
   })
 
   it('delegates concrete work to a worker under a team mandate', () => {

@@ -38,6 +38,10 @@ export interface Api {
   'GET teams': { response: TeamListView }
   'GET teams/:id': { response: TeamDetailView }
   'POST teams/:id/close': { body: { summary: string }; response: { closed: boolean } }
+  'POST teams/:id/message': { body: { text: string }; response: { message_id: string } }
+  'GET superagents': { response: { superagents: TeamListView['teams'][number]['members'] } }
+  'POST superagents': { body: { id: string; name: string; capabilities?: string[]; persona?: string; directory?: string }; response: { id: string } }
+  'POST superagents/:id': { body: { name?: string; capabilities?: string[] | null; persona?: string | null; directory?: string | null; disabled?: boolean }; response: { id: string } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
   'GET policy/history': { response: HistoryView }

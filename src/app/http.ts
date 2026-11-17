@@ -27,7 +27,7 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
-import { teamDetail, teamList } from './views/teams.ts'
+import { superagentList, teamDetail, teamList } from './views/teams.ts'
 
 export interface HttpHost {
   readonly store: Store
@@ -107,7 +107,8 @@ export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
+    masterId: runtime.masterId, paused: settings.paused, health: runtime.health,
+    superagents: superagentList(runtime.store).superagents }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
@@ -205,6 +206,38 @@ function routes(runtime: HttpHost): Routes {
       if (!team?.leadId) throw new RouteError(400, 'This team has no lead to close it')
       runtime.engine.closeTeam(params.id, team.leadId, summary)
       return { closed: true }
+    },
+    'POST teams/:id/message': async ({ params, body }) => {
+      const { text } = z.object({ text: z.string().trim().min(1).max(4000) }).parse(await body())
+      const team = runtime.engine.team(params.id)
+      if (!team) throw new RouteError(404, 'Team not found')
+      // A person writes as the lead, and only into a direct conversation, so a group is not a second orchestrator inbox.
+      if (team.kind !== 'direct') throw new RouteError(400, 'A message from a person goes to a direct conversation')
+      if (!team.leadId) throw new RouteError(400, 'This conversation has no lead to write as')
+      const message = runtime.engine.sendTeamMessage(params.id, team.leadId, text, 'discussion')
+      return { message_id: message.id }
+    },
+    'GET superagents': () => superagentList(store),
+    'POST superagents': async ({ body }) => {
+      const args = z.object({ id: z.string().trim().min(1).max(200), name: z.string().trim().min(1).max(160),
+        capabilities: z.array(z.string().trim().min(1).max(200)).max(16).optional(), persona: z.string().trim().min(1).max(4000).optional(),
+        directory: z.string().trim().min(1).max(1000).optional() }).parse(await body())
+      const superagent = runtime.engine.addSuperagent({ id: args.id, name: args.name, role: 'specialist', createdAt: '',
+        ...args.capabilities ? { capabilities: args.capabilities } : {}, ...args.persona ? { persona: args.persona } : {},
+        ...args.directory ? { directory: args.directory } : {} })
+      return { id: superagent.id }
+    },
+    'POST superagents/:id': async ({ params, body }) => {
+      const args = z.object({ name: z.string().trim().min(1).max(160).optional(),
+        capabilities: z.array(z.string().trim().min(1).max(200)).max(16).nullable().optional(),
+        persona: z.string().trim().min(1).max(4000).nullable().optional(), directory: z.string().trim().min(1).max(1000).nullable().optional(),
+        disabled: z.boolean().optional() }).parse(await body())
+      const superagent = runtime.engine.updateSuperagent(params.id, { ...args.name !== undefined ? { name: args.name } : {},
+        ...args.capabilities !== undefined ? { capabilities: args.capabilities } : {},
+        ...args.persona !== undefined ? { persona: args.persona } : {},
+        ...args.directory !== undefined ? { directory: args.directory ?? null } : {},
+        ...args.disabled === undefined ? {} : { disabled: args.disabled ? { at: new Date().toISOString(), by: 'panel' } : null } })
+      return { id: superagent.id }
     },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
     'PUT settings/:block': async ({ params, body }) => {

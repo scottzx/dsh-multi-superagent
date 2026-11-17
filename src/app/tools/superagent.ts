@@ -23,6 +23,8 @@ const CapabilitySchema = z.string().trim().min(1).max(200)
 const TeamNameSchema = z.string().trim().min(1).max(160)
 /** A superagent's project directory: an absolute path the lead binds to it, so it runs in its own checkout. */
 const DirectorySchema = z.string().trim().min(1).max(1000).optional()
+const PersonaSchema = z.string().trim().min(1).max(4000)
+const SkillSchema = z.string().trim().min(1).max(80)
 const TaskSpecSchema = z.object({
   assignee_id: MemberSchema,
   text: z.string().trim().min(1).max(4000),
@@ -36,6 +38,18 @@ function teamState(store: Pick<Store, 'team'>, teamId: string) {
   if (!team) return undefined
   return { team, tasks: store.team.tasks.list(teamId), messages: store.team.messages.list(teamId) }
 }
+/**
+ * The identity a lead tool writes as. The main Session is the team's lead, but its session id is not a team member, so a
+ * message or a close is recorded as the team's `leadId`. A direct conversation has no lead: the other member is the recipient.
+ */
+function voiceOf(store: Pick<Store, 'team'>, teamId: string, sessionId: string): string {
+  const team = store.team.teams.get(teamId)
+  if (!team) return sessionId
+  if (team.memberIds.includes(sessionId)) return sessionId
+  if (team.leadId && team.memberIds.includes(team.leadId)) return team.leadId
+  const other = team.memberIds.find(id => id !== sessionId)
+  return other ?? sessionId
+}
 
 /**
  * The lead's tools for a team of superagents: register a superagent, create a team conversation, propose a division, dispatch
@@ -47,19 +61,44 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
   return [
     tool({
       name: 'lead_team_create_superagent',
-      description: 'Register a superagent identity, a lead or a specialist, with optional capabilities and an optional project directory it runs in.',
+      description: 'Register a superagent, with optional capabilities, persona, skills and project directory.',
       schema: z.object({ id: MemberSchema, name: z.string().trim().min(1).max(160), role: z.enum(['lead', 'specialist']),
-        capabilities: z.array(CapabilitySchema).max(16).optional(), directory: DirectorySchema }).strict(),
+        capabilities: z.array(CapabilitySchema).max(16).optional(), persona: PersonaSchema.optional(),
+        skills: z.array(SkillSchema).max(16).optional(), directory: DirectorySchema }).strict(),
       execute: async args => {
         const superagent = engine.addSuperagent({ id: args.id, name: args.name, role: args.role, ...args.capabilities ? { capabilities: args.capabilities } : {},
+          ...args.persona ? { persona: args.persona } : {}, ...args.skills ? { skills: args.skills } : {},
           ...args.directory ? { directory: args.directory } : {}, createdAt: '' })
+        return { superagent }
+      },
+    }),
+    tool({
+      name: 'lead_team_list_superagents',
+      description: 'List every superagent identity: its role, capabilities, persona, skills, directory and whether it is disabled.',
+      schema: z.object({}).strict(),
+      execute: async () => ({ superagents: engine.superagents() }),
+    }),
+    tool({
+      name: 'lead_team_update_superagent',
+      description: 'Change a superagent. A field left out is kept; null clears capabilities, persona, skills or directory.',
+      schema: z.object({ id: MemberSchema, name: z.string().trim().min(1).max(160).optional(),
+        capabilities: z.array(CapabilitySchema).max(16).nullable().optional(), persona: PersonaSchema.nullable().optional(),
+        skills: z.array(SkillSchema).max(16).nullable().optional(), directory: z.string().trim().min(1).max(1000).nullable().optional(),
+        disabled: z.boolean().optional() }).strict(),
+      execute: async args => {
+        const superagent = engine.updateSuperagent(args.id, { ...args.name !== undefined ? { name: args.name } : {},
+          ...args.capabilities !== undefined ? { capabilities: args.capabilities } : {},
+          ...args.persona !== undefined ? { persona: args.persona } : {},
+          ...args.skills !== undefined ? { skills: args.skills } : {},
+          ...args.directory !== undefined ? { directory: args.directory ?? null } : {},
+          ...args.disabled === undefined ? {} : { disabled: args.disabled ? { at: new Date().toISOString(), by: leadId } : null } })
         return { superagent }
       },
     }),
     tool({
       name: 'lead_team_create',
       description: 'Create a team: a group of superagents, or a direct conversation between two.',
-      schema: z.object({ id: MemberSchema, name: TeamNameSchema, kind: z.enum(['group', 'direct']), member_ids: z.array(MemberSchema).min(2).max(16),
+      schema: z.object({ id: MemberSchema, name: TeamNameSchema, kind: z.enum(['group', 'direct']), member_ids: z.array(MemberSchema).min(1).max(16),
         lead_id: MemberSchema.optional() }).strict(),
       execute: async args => {
         const team = engine.addTeam({ id: args.id, name: args.name, kind: args.kind, memberIds: args.member_ids,
@@ -79,20 +118,23 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
     }),
     tool({
       name: 'lead_team_dispatch',
-      description: 'Start a division: ready tasks begin, the rest wait, and a dependency cycle fails at once.',
+      description: 'Start ready tasks now and return. Do not wait for reports.',
       schema: z.object({ team_id: MemberSchema }).strict(),
       execute: async args => {
         const tasks = engine.dispatchTeam(args.team_id)
-        return { team_id: args.team_id, tasks: tasks.map(task => ({ task_id: task.id, assignee_id: task.assigneeId, state: task.state, reason: task.reason })) }
+        const started = tasks.filter(task => task.state === 'working' || task.state === 'waiting')
+        return { team_id: args.team_id, started: started.length,
+          tasks: tasks.map(task => ({ task_id: task.id, assignee_id: task.assigneeId, state: task.state,
+            ...task.reason ? { reason: task.reason } : {} })) }
       },
     }),
     tool({
       name: 'lead_team_message',
-      description: 'Send a line to a team, from the lead.',
+      description: 'Send a line to a team, as its lead.',
       schema: z.object({ team_id: MemberSchema, text: z.string().trim().min(1).max(4000) }).strict(),
       execute: async args => {
-        const message = engine.sendTeamMessage(args.team_id, leadId, args.text, 'discussion')
-        return { team_id: args.team_id, message_id: message.id }
+        const message = engine.sendTeamMessage(args.team_id, voiceOf(store, args.team_id, leadId), args.text, 'discussion')
+        return { team_id: args.team_id, message_id: message.id, from: message.from }
       },
     }),
     tool({
@@ -100,8 +142,8 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
       description: 'Close a round with the lead decision. The team closes and its turns end.',
       schema: z.object({ team_id: MemberSchema, summary: z.string().trim().min(1).max(4000) }).strict(),
       execute: async args => {
-        const message = engine.closeTeam(args.team_id, leadId, args.summary)
-        return { team_id: args.team_id, message_id: message.id }
+        const message = engine.closeTeam(args.team_id, voiceOf(store, args.team_id, leadId), args.summary)
+        return { team_id: args.team_id, message_id: message.id, from: message.from }
       },
     }),
     tool({
@@ -109,6 +151,19 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
       description: 'Read a team, its tasks and its messages.',
       schema: z.object({ team_id: MemberSchema }).strict(),
       execute: async args => teamState(store, args.team_id) ?? { error: 'Unknown team' },
+    }),
+    tool({
+      name: 'lead_team_wait',
+      description: 'Read reports already in. Do not call this to wait.',
+      schema: z.object({ team_id: MemberSchema }).strict(),
+      execute: async args => {
+        const state = teamState(store, args.team_id)
+        if (!state) return { error: 'Unknown team' }
+        const open = state.tasks.filter(task => task.state === 'proposed' || task.state === 'waiting' || task.state === 'working')
+        return { team_id: args.team_id, open: open.length, tasks: state.tasks.map(task => ({ task_id: task.id, assignee_id: task.assigneeId,
+          state: task.state, ...task.report ? { summary: task.report } : {}, ...task.reason ? { reason: task.reason } : {},
+          ...task.outputs.length ? { outputs: task.outputs } : {} })) }
+      },
     }),
   ]
 }

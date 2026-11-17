@@ -1,7 +1,7 @@
 /** Teams: the team of superagents — identities, conversations, tasks, and the dispatch state machine. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { openTeam } from './model.ts'
+import { openTeam, superagentActive } from './model.ts'
 import type { Superagent, SuperagentTurn, Team, TeamMessage, TeamMessageKind, TeamTask } from './model.ts'
 import type { Reason } from './reasons.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
@@ -36,6 +36,31 @@ export class Teams extends EnginePart {
     this.emit('superagent.added', { superagentId: value.id })
     return value
   }
+  /**
+   * Change a superagent's persona, skills, directory or disabled state. A field left out is kept; `null` clears it.
+   * @throws UserError when the superagent is unknown.
+   */
+  updateSuperagent(id: string, change: SuperagentChange): Superagent {
+    const current = this.repo.team.superagents.get(id)
+    if (!current) throw new UserError('unknownSuperagent', { superagent: id })
+    const next = { ...current }
+    if (change.name !== undefined) next.name = change.name
+    if (change.capabilities === null) delete next.capabilities
+    else if (change.capabilities) next.capabilities = [...change.capabilities]
+    if (change.persona === null) delete next.persona
+    else if (change.persona !== undefined) next.persona = change.persona
+    if (change.skills === null) delete next.skills
+    else if (change.skills) next.skills = [...change.skills]
+    if (change.directory === null) delete next.directory
+    else if (change.directory !== undefined) next.directory = change.directory
+    if (change.disabled === null) delete next.disabled
+    else if (change.disabled) next.disabled = change.disabled
+    this.repo.team.superagents.save(next)
+    this.emit('superagent.updated', { superagentId: id })
+    return next
+  }
+  /** Every superagent identity, oldest first. */
+  superagents(): Superagent[] { return this.repo.team.superagents.list() }
   /** Create a team conversation. @throws UserError when the id is taken, a member is unknown, or a group has no lead in it. */
   addTeam(team: Team): Team {
     const at = this.now()
@@ -72,9 +97,17 @@ export class Teams extends EnginePart {
     const message: TeamMessage = { id: key('team-message', teamId, from, at, kind, text, ...taskId ? [taskId] : [], ...triggerId ? [triggerId] : []), teamId, from, text, at, kind, ...taskId ? { taskId } : {}, ...triggerId ? { triggerId } : {} }
     this.repo.team.messages.save(message)
     this.emit('team.message', { messageId: message.id, teamId })
+    const runner = this.runner()
     for (const memberId of team.kind === 'direct' ? [from, ...team.memberIds.filter(id => id !== from)] : team.memberIds) {
+      if (memberId === from) continue
+      const member = this.superagent(memberId)
+      // The lead is the main Session, not a superagent Session, so talk never starts one for it.
+      if (!member || !superagentActive(member) || member.role === 'lead' || memberId === team.leadId) continue
+      // A working turn reads the message with its task. An idle member gets it as talk, which does not start a task, so a
+      // question does not have to be wrapped as one.
       const task = this.currentTask(teamId, memberId)
-      if (task) this.runner().deliver(team, task)
+      if (task) runner.deliver(team, task)
+      else runner.talk?.(team, memberId, message)
     }
     return message
   }
@@ -295,3 +328,6 @@ export function inCycle(tasks: readonly TeamTask[]): Set<string> {
 
 /** The reason a team task failed, as a `Reason` the panel can word. */
 export const taskReason = (reason: string): Reason => ({ code: 'teamTaskFailed', values: { reason } })
+/** A change to a superagent: a field left out is kept, and `null` clears an optional one. */
+export interface SuperagentChange { name?: string; capabilities?: string[] | null; persona?: string | null;
+  skills?: string[] | null; directory?: string | null; disabled?: { at: string; by: string } | null }

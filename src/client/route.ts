@@ -50,6 +50,16 @@ export function parseRoute(value: unknown): Route | undefined {
 }
 
 const ROUTE_KEY = 'dsh-superagent/route'
+/** The sidebar asks the panel to open one team conversation. The panel may not be mounted yet, so the route is stored too. */
+export const TEAM_OPEN = 'dsh-superagent:open-team'
+export function requestTeam(id: string): void {
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(ROUTE_KEY) ?? 'null') as { stack?: unknown; group?: unknown } | null
+    sessionStorage.setItem(ROUTE_KEY, JSON.stringify({ route: { page: 'team', id },
+      stack: Array.isArray(stored?.stack) ? stored.stack : [], ...stored?.group ? { group: stored.group } : {} }))
+  } catch { /* Route memory is a convenience. */ }
+  window.dispatchEvent(new CustomEvent(TEAM_OPEN, { detail: id }))
+}
 export interface Location { route: Route; stack: Route[]; group?: SettingsGroup | undefined }
 export const lastSettingsGroup = ({ route, group }: Location): SettingsGroup => route.page === 'settings' ? route.query.group
   : group ?? 'source'

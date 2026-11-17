@@ -55,6 +55,8 @@ export const USER_ERRORS = {
   noProposedTasks: ['refused', 'This team has no proposed tasks to dispatch'],
   taskNotWorking: ['refused', 'This team task is not working'],
   outputsMissing: ['refused', 'A done task must report the deliverables it declared'],
+  superagentDisabled: ['refused', 'This superagent is disabled; enable it before it can take a turn or a message'],
+  notDirect: ['refused', 'A message from a person goes to a direct conversation, not a group'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
 export type UserErrorCode = keyof typeof USER_ERRORS
 

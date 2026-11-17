@@ -331,6 +331,15 @@ export interface Superagent {
   /** Capabilities are prompt text the lead uses to divide work; the core does not interpret them. */
   capabilities?: string[]
   /**
+   * Who this superagent is, in its own words: role, method and what it delivers. Injected into its Session's system
+   * prompt; the core does not interpret it. Absent means the shared superagent prompt is all it has.
+   */
+  persona?: string
+  /** Skill names bound to this superagent, registered on its Session in addition to the deployment's skills. */
+  skills?: string[]
+  /** A person or the lead paused this superagent: it keeps its identity, but starts no turn and receives no message. */
+  disabled?: { at: string; by: string }
+  /**
    * The project directory this superagent's Session runs in, when the lead bound one to it. One directory may host one
    * superagent, so a specialist can be pointed at its own checkout or module. Optional: when it is absent (or blank),
    * the runner falls back to the machine's state directory.
@@ -338,6 +347,8 @@ export interface Superagent {
   directory?: string
   createdAt: string
 }
+/** Whether a superagent may take a turn or a message: it has not been disabled. */
+export const superagentActive = (superagent: Pick<Superagent, 'disabled'>): boolean => !superagent.disabled
 /** The directory a superagent's Session runs in: its bound project directory, or `fallback` when it has none. */
 export const superagentWorkspace = (superagent: Superagent | undefined, fallback: string): string =>
   superagent?.directory?.trim() ? superagent.directory.trim() : fallback

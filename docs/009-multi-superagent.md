@@ -54,6 +54,11 @@ A first-class agent identity in the domain: `{ id, name, role: 'lead' | 'special
   its own checkout or module (one directory per superagent). When it is absent or blank, the runner starts the
   superagent's Session in the machine's **state directory**, as before. The lead sets it through
   `lead_team_create_superagent`; the panel shows it on the team's detail page.
+- `persona` is prompt text injected into that superagent's Session, after the shared superagent prompt, so a
+  product manager starts knowing it is a product manager. `capabilities` are named in the same section. The core
+  still does not interpret either. `skills` names skills bound to that superagent; they are named in its prompt,
+  and the Session registers the deployment's skills as before.
+- `disabled` pauses a superagent: it keeps its identity, but starts no turn and receives no message.
 - One writer: the Engine, through the Teams part.
 
 ### Team
@@ -153,8 +158,13 @@ flowchart TB
    `superagent_team_report`: `done` with its outputs, or `failed` with a reason. It may send messages with
    `superagent_team_message` (group or direct) and delegate concrete implementation to a worker with
    `superagent_delegate`, which creates a Ticket under a team mandate.
-5. **Close.** When a round's tasks are done or failed, the lead runs a closing turn and records its
-   `decision` message. `lead_team_wait` returns the reports so the lead can summarize.
+5. **Close.** Dispatch returns as soon as the turns are started. The lead acknowledges the person in that same
+   turn and ends it; it does not wait for the specialists. When a task is done or failed, a `team_report` is
+   steered into the lead's Session, the same way a worker report is. The lead relays only once every task of the
+   round is done or failed, then closes. `lead_team_wait` reads reports already in; it does not block.
+   `lead_team_message` and `lead_team_close` write as the team's `leadId`, not as the main Session id, because
+   that id is not a team member. A message to a specialist with no working task is delivered as talk, which
+   starts no task. The lead is the main Session, so talk does not start a second Session for it.
 6. **Deliver.** The lead relays the result to the source conversation, exactly as a worker's result is
    relayed today.
 
@@ -171,7 +181,7 @@ within its task. New admission stays with the lead.
 | Engine | `src/core/engine.ts` | The Teams part, the lead and specialist role interfaces, delegation to a Ticket |
 | Runner | `src/executor/dsh.ts` | `DshExecutor` implements `SuperagentRunner`: one superagent Session and its turns, launched in the superagent's bound directory or the state directory |
 | Sessions | `src/app/sessions.ts` | The `superagent` role, its preset, its prompt and tools |
-| Lead tools | `src/app/tools/main.ts` (and `src/app/tools/superagent.ts`) | `lead_team_create_superagent` (including its `directory`), `lead_team_create`, `lead_team_propose`, `lead_team_dispatch`, `lead_team_message`, `lead_team_close`, `lead_team_read` |
+| Lead tools | `src/app/tools/main.ts` (and `src/app/tools/superagent.ts`) | `lead_team_create_superagent` (including its `directory`, `persona` and `skills`), `lead_team_list_superagents`, `lead_team_update_superagent`, `lead_team_create`, `lead_team_propose`, `lead_team_dispatch`, `lead_team_message`, `lead_team_close`, `lead_team_read`, `lead_team_wait` |
 | Specialist tools | `src/app/tools/superagent.ts` | `superagent_team_report`, `superagent_team_message`, `superagent_delegate` |
 | Prompts | `prompts/` | `lead.md`, `superagent.md`, and the team-communication section |
 | Store | `src/app/store.ts`, `src/app/migration.ts` | The `team`, `superagent`, `team_message` and `team_task` tables, schema 12 |
@@ -204,7 +214,7 @@ The `multi-superagent` fork delivers the design above as a **runnable skeleton**
   the team-mandate basis, and a superagent's bound project directory (optional, falling back to the state
   directory), with unit tests over in-memory repositories;
 - the `SuperagentRunner` port and its `DshExecutor` implementation, with superagent Sessions;
-- the lead and specialist tools, and the `superagent` prompt role;
+- the lead and specialist tools, including `lead_team_wait`, and the `superagent` prompt role, which names the superagent and injects its persona;
 - the team tables and schema 12;
 - the Web panel's Team tab: the list of team conversations, one team's tasks and messages, and closing a
   round from the panel.

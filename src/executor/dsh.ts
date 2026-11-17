@@ -727,6 +727,13 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
   start(team: Team, task: TeamTask): void { this.host.effects.enqueue('superagent-launch', task.id, { teamId: team.id, taskId: task.id }) }
   /** Enqueues a `superagent-delivery` effect to steer a team's new messages into a running superagent turn. */
   deliver(team: Team, task: TeamTask): void { this.host.effects.enqueue('superagent-delivery', task.id, { teamId: team.id, taskId: task.id }) }
+  /**
+   * Delivers a team's message to a member with no working task, so talk does not wait for a dispatched task. The message is
+   * already on the team record; this only wakes the member's Session to read it.
+   */
+  talk(team: Team, memberId: string, message: TeamMessage): void {
+    this.host.effects.enqueue('superagent-delivery', `talk:${memberId}:${message.id}`, { teamId: team.id, taskId: message.id, memberId })
+  }
   /** Cancels a superagent turn; the task's end has already been recorded in the domain. */
   stop(team: Team, task: TeamTask, _reason: string): void {
     this.host.store.afterCommit(() => {
@@ -750,7 +757,9 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     this.host.engine.superagentStarted(teamId, taskId)
     this.host.engine.superagentDelivered(teamId, taskId)
   }
-  private async deliverTurn({ teamId, taskId }: { teamId: string; taskId: string }): Promise<void> {
+  private async deliverTurn({ teamId, taskId, memberId }: { teamId: string; taskId: string; memberId?: string }): Promise<void> {
+    // Talk to a member with no working task: wake its Session with the one message, which starts no task.
+    if (memberId) return this.deliverTalk(teamId, memberId, taskId)
     const team = this.host.store.team.teams.get(teamId)
     const task = team && this.host.store.team.tasks.get(taskId)
     if (!team || !task || task.teamId !== teamId || !task.turn || task.turn.state === 'ended') return
@@ -764,6 +773,21 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     await this.host.sessions.prompt(sessionId, `superagent-deliver:${task.id}:${messages.at(-1)!.id}`,
       messages.map(message => `${message.from}: ${message.text}`).join('\n'), 'steer')
     this.host.engine.superagentDelivered(teamId, taskId)
+  }
+  /** Wake an idle member's Session with one team message. A member that has since taken a task reads it with that task. */
+  private async deliverTalk(teamId: string, memberId: string, messageId: string): Promise<void> {
+    const team = this.host.store.team.teams.get(teamId)
+    const message = team && this.host.store.team.messages.get(messageId)
+    if (!team || !message || message.teamId !== teamId || !team.memberIds.includes(memberId)) return
+    const busy = this.host.store.team.tasks.list(teamId).some(task => task.assigneeId === memberId && task.state === 'working'
+      && task.turn && task.turn.state !== 'ended')
+    if (busy) return
+    const sessionId = superagentSessionId(memberId)
+    const workspace = superagentWorkspace(this.host.store.team.superagents.get(memberId), this.host.machine.stateDir)
+    if (!this.host.context.agents.get(sessionId as SessionId)) await this.host.sessions.ensure(sessionId, workspace, `${team.name} · ${memberId}`, 'superagent')
+    await this.host.sessions.prompt(sessionId, `superagent-talk:${message.id}`,
+      JSON.stringify({ team_id: team.id, team_name: team.name, kind: 'team_message', from: message.from, text: message.text,
+        note: 'This is talk, not a dispatched task. Answer with superagent_team_message; do not report a task.' }), 'steer')
   }
   private alive(teamId: string, taskId: string): boolean {
     const task = this.host.store.team.tasks.get(taskId)
