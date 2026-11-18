@@ -1,0 +1,10 @@
+# Profile layer for the ModelScope Studio demo container. Mirrors
+# examples/profile.cordis.patch.yml with container paths (see docs/006-deployment.md):
+# the webserver binds loopback and nginx fronts it on 0.0.0.0:7860.
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3082
+- id: dsh-superagent
+  config:
+    stateDir: /mnt/workspace/dsh-state

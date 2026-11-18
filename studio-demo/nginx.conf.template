@@ -1,0 +1,46 @@
+# Rendered by entrypoint.sh ({{TOKEN}} = the dsh web login token) to
+# /etc/nginx/conf.d/dsh-demo.conf. Panel at /, docs at /demo/.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 7860;
+    server_name _;
+    access_log /dev/stdout;
+    error_log /dev/stderr warn;
+
+    # Bare / bounces into the panel carrying the current web token: the DSH web
+    # login fence answers 401 without it.
+    location = / {
+        if ($arg_token != "{{TOKEN}}") { return 302 /?token={{TOKEN}}; }
+        proxy_pass http://127.0.0.1:3082;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # DSH panel: SPA, API and websockets.
+    location / {
+        proxy_pass http://127.0.0.1:3082;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Docs site (static; its relative links work at any mount point).
+    location = /demo { return 301 /demo/; }
+    location /demo/ {
+        alias /opt/dsh-superagent/studio-demo/site/;
+        index index.html;
+    }
+}

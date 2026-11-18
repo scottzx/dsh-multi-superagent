@@ -1,0 +1,8 @@
+node_modules
+.pnpm-store
+.agents
+.artifacts
+.git
+coverage
+lib
+*.log
