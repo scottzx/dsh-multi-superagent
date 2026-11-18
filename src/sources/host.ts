@@ -13,6 +13,7 @@ export const HEALTH_TEXT = {
   sourceOff: 'Off',
   feishuCliUnset: 'The Source is on, and its bot lark-cli is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
+  githubOff: 'GitHub monitoring is off until a repository is set on the Source or on a specialist',
   pollFailures: '{count} consecutive failed polls; last: {error}',
 } as const
 export type HealthCode = keyof typeof HEALTH_TEXT
@@ -32,8 +33,10 @@ export interface SourceContext {
   readonly deployment: Deployment
   readonly commands: Commands
   readonly ready: Promise<void>
-  /** True once setup resolved the repository and accounts; Sources poll only then. */
+  /** True once setup resolved the accounts; Sources poll only then. A repository is not required. */
   configured(): boolean
+  /** Repositories this deployment watches: the Source's own, plus each specialist's, without blanks or duplicates. */
+  repositories(): string[]
   /** Setup problem keeping this Source's account from running; only the Feishu bot check reports one. */
   readonly problem?: SetupProblem | undefined
   /** Returns a Source's configuration while enabled, or undefined while disabled or uninstalled. */

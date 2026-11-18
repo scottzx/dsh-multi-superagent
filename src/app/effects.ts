@@ -17,8 +17,10 @@ export interface EffectPayloads {
   delivery: { ticketId: string }
   /** Launch a superagent's turn on a team task; the key is the task ID. */
   'superagent-launch': { teamId: string; taskId: string }
-  /** Hand a team's new messages to a running superagent turn; the key is the task ID, or a talk key for an idle member. */
-  'superagent-delivery': { teamId: string; taskId: string; memberId?: string }
+  /** Hand a team's new messages to a running superagent turn; the key is the task ID. */
+  'superagent-delivery': { teamId: string; taskId: string }
+  /** Wake a member because mentions wait in its inbox; the key is the member's id, so a burst wakes it once. */
+  'superagent-inbox': { botId: string }
   /** Steer a report or a candidate into the main Session; the key is the request ID. */
   relay: { text: string }
   /** Inject a notice into the main Session without waking it; the key names what it reports, such as `prompts`. */

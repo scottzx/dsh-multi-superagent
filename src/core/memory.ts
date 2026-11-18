@@ -1,6 +1,6 @@
 /** In-memory repository implementation for testing and ephemeral engine instances. */
-import { latestAssignment, type Decision, type Superagent, type Team, type TeamMessage, type TeamTask, type Thread, type Ticket, type Trigger,
-  type TriggerDisposition } from './model.ts'
+import { latestAssignment, type Decision, type InboxItem, type Superagent, type Team, type TeamCursor, type TeamMessage, type TeamTask, type Thread,
+  type Ticket, type Trigger, type TriggerDisposition } from './model.ts'
 import type { Repositories } from './ports.ts'
 
 const clone = <T>(value: T): T => structuredClone(value)
@@ -18,9 +18,11 @@ export class MemoryRepositories implements Repositories {
   private readonly teamRows = new Map<string, Team>()
   private readonly teamMessageRows = new Map<string, TeamMessage>()
   private readonly teamTaskRows = new Map<string, TeamTask>()
+  private readonly inboxRows = new Map<string, InboxItem>()
+  private readonly cursorRows = new Map<string, TeamCursor>()
   atomic<T>(work: () => T): T {
     const maps: Map<string, unknown>[] = [this.triggerRows, this.dispositions, this.threadRows, this.ticketRows, this.decisionRows,
-      this.superagentRows, this.teamRows, this.teamMessageRows, this.teamTaskRows]
+      this.superagentRows, this.teamRows, this.teamMessageRows, this.teamTaskRows, this.inboxRows, this.cursorRows]
     const snapshot = maps.map(map => new Map(map))
     try { return work() }
     catch (error) {
@@ -73,6 +75,17 @@ export class MemoryRepositories implements Repositories {
       get: (id: string) => clone(this.teamTaskRows.get(id)),
       save: (value: TeamTask) => { this.teamTaskRows.set(value.id, clone(value)) },
       list: (teamId: string) => [...this.teamTaskRows.values()].filter(task => task.teamId === teamId).map(clone),
+    },
+    inbox: {
+      list: (botId: string, state?: 'pending' | 'delivered') => [...this.inboxRows.values()]
+        .filter(item => item.botId === botId && (state === undefined || item.state === state))
+        .sort((a, b) => a.at.localeCompare(b.at)).map(clone),
+      save: (value: InboxItem) => { this.inboxRows.set(`${value.botId}/${value.messageId}`, clone(value)) },
+    },
+    cursors: {
+      get: (teamId: string, memberId: string) => clone(this.cursorRows.get(`${teamId}/${memberId}`)),
+      save: (value: TeamCursor) => { this.cursorRows.set(`${value.teamId}/${value.memberId}`, clone(value)) },
+      list: (memberId: string) => [...this.cursorRows.values()].filter(cursor => cursor.memberId === memberId).map(clone),
     },
   }
 }

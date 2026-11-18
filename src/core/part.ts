@@ -13,6 +13,8 @@ export interface EngineOptions {
   executor: Executor
   /** Runs superagent turns: one Session per superagent, launched, delivered to and stopped. Optional: an Engine that never dispatches a team needs no runner. */
   superagent?: SuperagentRunner
+  /** The deployment's own lead: the main Session's identity, which leads the standing all-hands group. */
+  leadId?: string
   outbox: Outbox
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
   /** Prepares a Ticket a specialist delegated to a worker, which carries a team mandate rather than an accept outcome. */

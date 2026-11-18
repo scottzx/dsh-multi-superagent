@@ -4,7 +4,8 @@ export * from './ports.ts'
 export { Engine, type EngineForExecutor, type EngineForLead, type EngineForMainSession, type EngineForPeople, type EngineForSettings,
   type EngineForSources, type EngineForSpecialist, type EngineForSuperagentRunner, type EngineForTeamPanel, type EngineOptions, type Outcome,
   type ReceiveResult, type Reply, type ReplyRequest, type WorkerReport } from './engine.ts'
-export { Teams, inCycle, taskReason, type SuperagentChange } from './team.ts'
+export { BATCH_CONTEXT, BATCH_MENTIONS, HUMAN_ID, Teams, inCycle, taskReason, type InboxBatch, type InboxBatchGroup, type SendOptions,
+  type SuperagentChange } from './team.ts'
 export { UserError, USER_ERRORS, type UserErrorCode } from './errors.ts'
 export { REASONS, reasonText, said, type Reason, type ReasonCode } from './reasons.ts'
 export { MemoryRepositories } from './memory.ts'

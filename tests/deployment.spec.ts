@@ -69,7 +69,9 @@ describe('setup', () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
       expect(resolveDeployment(machine(), github, probe, path)).rejects.toEqual(setupError(place, code, values))
     const repository = 'acme/widgets'
-    await needs('github', 'repositoryUnset', {}, { cli: 'gh' })
+    // A CLI without a repository is allowed: monitoring stays off until a repository is named, here or on a specialist.
+    expect((await resolveDeployment(machine(), { cli: 'gh' }, probe, path)).repository).toBe('')
+    expect((await resolveDeployment(machine(), {}, probe, path)).github).toBeUndefined()
     await needs('github', 'agentCliUnset', {}, { repository })
     await needs('github', 'agentCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { repository, cli: join(dir, 'missing') })
     await needs('github', 'agentCliMissing', { output: 'bin/gh must be a command name or an absolute path' }, { repository, cli: 'bin/gh' })

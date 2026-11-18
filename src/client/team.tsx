@@ -4,7 +4,10 @@ import type { SuperagentRow, TeamDetailView, TeamListView } from '../app/views/t
 import { usePoll } from './api.ts'
 import { Button, Icon, Input, Modal, Tag } from './controls.tsx'
 import { useAction, usePanel } from './provider.tsx'
+import { Field } from './settings-kit.tsx'
+import { teamName } from './text.ts'
 import { MarkdownLite, PageHead, Section, StageMark, When } from './widgets.tsx'
+import { TeamChat } from './chat.tsx'
 
 const TASK_MARKS: Record<TeamDetailView['tasks'][number]['state'],
   { dot: 'idle' | 'warning' | 'ongoing' | 'done' | 'error'; icon: 'queue' | 'clock' | 'running' | 'decision' | 'alert' }> = {
@@ -25,7 +28,7 @@ function TeamLine({ team, onOpen }: { team: TeamListView['teams'][number]; onOpe
     </div>
     <div className="dt-ticket-body">
       <div className="dt-row-title">
-        <button type="button" className="dt-open" onClick={() => onOpen(team.id)}>{team.name}</button>
+        <button type="button" className="dt-open" onClick={() => onOpen(team.id)}>{teamName(t, team)}</button>
       </div>
       <div className="dt-row-meta dt-line">
         <Tag tone="quiet">{t(`teamKind.${team.kind}`)}</Tag>
@@ -60,37 +63,6 @@ function TeamTaskLine({ task }: { task: TeamDetailView['tasks'][number] }) {
   </li>
 }
 
-function TeamMessageLine({ message }: { message: TeamDetailView['messages'][number] }) {
-  const { t } = usePanel()
-  return <li className="dt-row dt-ticket" data-state="idle">
-    <div className="dt-ticket-stage">
-      <StageMark state={message.kind === 'decision' ? 'done' : message.kind === 'report' ? 'ongoing' : 'idle'}
-        icon={message.kind === 'decision' ? 'decision' : message.kind === 'report' ? 'running' : 'message'}
-        label={t(`teamMsg.${message.kind}`)} />
-    </div>
-    <div className="dt-ticket-body">
-      <div className="dt-row-title"><span className="dt-row-who">{message.fromName}</span></div>
-      <div className="dt-row-meta dt-line"><MarkdownLite text={message.text} /></div>
-      <div className="dt-row-meta dt-line"><When at={message.at} /></div>
-    </div>
-  </li>
-}
-
-function Talk({ teamId }: { teamId: string }) {
-  const { t, call, notify } = usePanel()
-  const [text, setText] = useState('')
-  const run = useAction(async () => { await call('POST teams/:id/message', { id: teamId, body: { text } }) })
-  const submit = () => {
-    if (!text.trim()) { notify(t('teamMessageRequired')); return }
-    void run.run().then(done => { if (done) { setText(''); notify(t('teamMessageSent')) } })
-  }
-  return <Section title={t('teamMessage')} hint={t('teamMessageHint')}>
-    <textarea className="dt-textarea" rows={3} maxLength={4000} value={text} spellCheck={false}
-      aria-label={t('teamMessage')} onChange={event => setText(event.target.value)} />
-    <div className="dt-subhead-actions"><Button variant="primary" size="sm" disabled={run.busy} onClick={submit}>{t('teamMessage')}</Button></div>
-  </Section>
-}
-
 function CloseTeam({ teamId, onClosed }: { teamId: string; onClosed: () => void }) {
   const { t, call, notify } = usePanel()
   const [open, setOpen] = useState(false)
@@ -116,10 +88,11 @@ function Roster() {
   const { t, call } = usePanel()
   const list = usePoll(() => call('GET superagents'), [])
   const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState({ id: '', name: '', persona: '', capabilities: '' })
+  const [draft, setDraft] = useState({ id: '', name: '', persona: '', capabilities: '', directory: '' })
   const create = useAction(async () => {
     await call('POST superagents', { body: { id: draft.id.trim(), name: draft.name.trim(),
       ...draft.persona.trim() ? { persona: draft.persona.trim() } : {},
+      ...draft.directory.trim() ? { directory: draft.directory.trim() } : {},
       ...draft.capabilities.trim() ? { capabilities: draft.capabilities.split(',').map(item => item.trim()).filter(Boolean) } : {} } })
   }, { reload: async () => { list.reload() } })
   const toggle = useAction(async (member: SuperagentRow) => {
@@ -146,6 +119,9 @@ function Roster() {
       <label className="dt-field">{t('superagentId')}<Input value={draft.id} onChange={event => setDraft({ ...draft, id: event.target.value })} /></label>
       <label className="dt-field">{t('superagentName')}<Input value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
       <label className="dt-field">{t('superagentCapabilities')}<Input value={draft.capabilities} onChange={event => setDraft({ ...draft, capabilities: event.target.value })} /></label>
+      <Field label={t('superagentDirectory')} hint={t('superagentDirectoryHint')}>
+        <Input value={draft.directory} onChange={event => setDraft({ ...draft, directory: event.target.value })} />
+      </Field>
       <label className="dt-field">{t('superagentPersona')}<textarea className="dt-textarea" rows={4} value={draft.persona} onChange={event => setDraft({ ...draft, persona: event.target.value })} /></label>
     </Modal>
   </Section>
@@ -167,7 +143,7 @@ export function TeamPage({ id }: { id?: string }) {
   if (!detail.data) return <p className="dt-error" role="alert">{detail.error?.message ?? t('loading')}</p>
   const data = detail.data as TeamDetailView
   return <>
-    <PageHead title={data.team.name}>
+    <PageHead title={teamName(t, data.team)}>
       {!data.team.closed && <CloseTeam teamId={id} onClosed={() => navigate({ page: 'team' })} />}
     </PageHead>
     <Section title={t('teamInfo')}>
@@ -186,9 +162,6 @@ export function TeamPage({ id }: { id?: string }) {
     <Section title={t('teamTasksTitle')} count={data.tasks.length}>
       <ul className="dt-list dt-cards">{data.tasks.map(task => <TeamTaskLine key={task.id} task={task} />)}</ul>
     </Section>
-    <Section title={t('teamMessagesTitle')} count={data.messages.length}>
-      <ul className="dt-list dt-cards">{data.messages.map(message => <TeamMessageLine key={message.id} message={message} />)}</ul>
-    </Section>
-    {data.team.kind === 'direct' && !data.team.closed && <Talk teamId={id} />}
+    <TeamChat team={data.team} detail={data} onReload={() => detail.reload()} />
   </>
 }

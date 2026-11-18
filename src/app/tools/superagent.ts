@@ -1,6 +1,6 @@
 /** Team tools: the lead proposes, dispatches and closes a division; a specialist reports, talks and delegates. */
 import { z } from 'zod'
-import { type EngineForLead, type EngineForSpecialist, type Superagent } from '../../core/index.ts'
+import { ALL_HANDS_ID, type EngineForLead, type EngineForSpecialist, type Superagent } from '../../core/index.ts'
 import type { Store } from '../store.ts'
 import { tool, type Tool } from './tool.ts'
 
@@ -23,8 +23,11 @@ const CapabilitySchema = z.string().trim().min(1).max(200)
 const TeamNameSchema = z.string().trim().min(1).max(160)
 /** A superagent's project directory: an absolute path the lead binds to it, so it runs in its own checkout. */
 const DirectorySchema = z.string().trim().min(1).max(1000).optional()
+const RepoSchema = z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/)
 const PersonaSchema = z.string().trim().min(1).max(4000)
 const SkillSchema = z.string().trim().min(1).max(80)
+/** The superagents a message wakes: a structured list, never a text search, so at most five of them. */
+const MentionSchema = z.array(MemberSchema).min(1).max(5).describe('The superagents who should answer.')
 const TaskSpecSchema = z.object({
   assignee_id: MemberSchema,
   text: z.string().trim().min(1).max(4000),
@@ -61,29 +64,33 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
   return [
     tool({
       name: 'lead_team_create_superagent',
-      description: 'Register a superagent, with optional capabilities, persona, skills and project directory.',
+      description: 'Register a superagent. It joins the all-hands group.',
       schema: z.object({ id: MemberSchema, name: z.string().trim().min(1).max(160), role: z.enum(['lead', 'specialist']),
         capabilities: z.array(CapabilitySchema).max(16).optional(), persona: PersonaSchema.optional(),
-        skills: z.array(SkillSchema).max(16).optional(), directory: DirectorySchema }).strict(),
+        skills: z.array(SkillSchema).max(16).optional(), directory: DirectorySchema,
+        repository: RepoSchema.optional(), feishu_cli: z.string().trim().max(1000).optional() }).strict(),
       execute: async args => {
         const superagent = engine.addSuperagent({ id: args.id, name: args.name, role: args.role, ...args.capabilities ? { capabilities: args.capabilities } : {},
           ...args.persona ? { persona: args.persona } : {}, ...args.skills ? { skills: args.skills } : {},
-          ...args.directory ? { directory: args.directory } : {}, createdAt: '' })
-        return { superagent }
+          ...args.directory ? { directory: args.directory } : {}, ...args.repository ? { repository: args.repository } : {},
+          ...args.feishu_cli ? { feishuCli: args.feishu_cli } : {}, createdAt: '' })
+        const allHands = engine.team(ALL_HANDS_ID)
+        return { superagent, ...allHands ? { all_hands: { id: allHands.id, name: allHands.name, lead_id: allHands.leadId } } : {} }
       },
     }),
     tool({
       name: 'lead_team_list_superagents',
-      description: 'List every superagent identity: its role, capabilities, persona, skills, directory and whether it is disabled.',
+      description: 'List every superagent, and the all-hands group.',
       schema: z.object({}).strict(),
-      execute: async () => ({ superagents: engine.superagents() }),
+      execute: async () => ({ superagents: engine.superagents(), all_hands: engine.team(ALL_HANDS_ID) ?? null }),
     }),
     tool({
       name: 'lead_team_update_superagent',
-      description: 'Change a superagent. A field left out is kept; null clears capabilities, persona, skills or directory.',
+      description: 'Change a superagent. A field left out is kept; null clears an optional one.',
       schema: z.object({ id: MemberSchema, name: z.string().trim().min(1).max(160).optional(),
         capabilities: z.array(CapabilitySchema).max(16).nullable().optional(), persona: PersonaSchema.nullable().optional(),
         skills: z.array(SkillSchema).max(16).nullable().optional(), directory: z.string().trim().min(1).max(1000).nullable().optional(),
+        repository: RepoSchema.nullable().optional(), feishu_cli: z.string().trim().max(1000).nullable().optional(),
         disabled: z.boolean().optional() }).strict(),
       execute: async args => {
         const superagent = engine.updateSuperagent(args.id, { ...args.name !== undefined ? { name: args.name } : {},
@@ -91,6 +98,8 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
           ...args.persona !== undefined ? { persona: args.persona } : {},
           ...args.skills !== undefined ? { skills: args.skills } : {},
           ...args.directory !== undefined ? { directory: args.directory ?? null } : {},
+          ...args.repository !== undefined ? { repository: args.repository || null } : {},
+          ...args.feishu_cli !== undefined ? { feishuCli: args.feishu_cli || null } : {},
           ...args.disabled === undefined ? {} : { disabled: args.disabled ? { at: new Date().toISOString(), by: leadId } : null } })
         return { superagent }
       },
@@ -130,11 +139,12 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
     }),
     tool({
       name: 'lead_team_message',
-      description: 'Send a line to a team, as its lead.',
-      schema: z.object({ team_id: MemberSchema, text: z.string().trim().min(1).max(4000) }).strict(),
+      description: 'Say something as lead. Only `at` wakes anyone.',
+      schema: z.object({ team_id: MemberSchema, text: z.string().trim().min(1).max(4000), at: MentionSchema.optional() }).strict(),
       execute: async args => {
-        const message = engine.sendTeamMessage(args.team_id, voiceOf(store, args.team_id, leadId), args.text, 'discussion')
-        return { team_id: args.team_id, message_id: message.id, from: message.from }
+        const message = engine.sendTeamMessage(args.team_id, voiceOf(store, args.team_id, leadId), args.text, 'discussion',
+          { ...args.at ? { mentions: args.at } : {} })
+        return { team_id: args.team_id, message_id: message.id, from: message.from, woke: message.mentions ?? [] }
       },
     }),
     tool({
@@ -187,11 +197,11 @@ export function superagentTools(host: SuperagentToolsHost): Tool[] {
     }),
     tool({
       name: 'superagent_team_message',
-      description: 'Send a line to your team, or to the other superagent in a direct conversation. Keep it short and about the work.',
-      schema: z.object({ team_id: MemberSchema, text: z.string().trim().min(1).max(4000) }).strict(),
+      description: 'Say something in your team. Only `at` wakes anyone. Never name yourself.',
+      schema: z.object({ team_id: MemberSchema, text: z.string().trim().min(1).max(4000), at: MentionSchema.optional() }).strict(),
       execute: async args => {
-        const message = engine.sendTeamMessage(args.team_id, superagent.id, args.text, 'discussion')
-        return { team_id: args.team_id, message_id: message.id }
+        const message = engine.sendTeamMessage(args.team_id, superagent.id, args.text, 'discussion', { ...args.at ? { mentions: args.at } : {} })
+        return { team_id: args.team_id, message_id: message.id, woke: message.mentions ?? [] }
       },
     }),
     tool({

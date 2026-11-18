@@ -85,6 +85,8 @@ function noWait({ name, arguments: input }: { name: string; arguments: unknown }
   return undefined
 }
 
+/** The tools a superagent may use with no task of its own: answering a message it was mentioned in, and reading the team. */
+const TALK_TOOLS = new Set(['superagent_team_message', 'superagent_team_read'])
 /**
  * Creates and decorates orchestrator and worker DSH `Agent` sessions with role models, system prompt sections from `Prompts`, runtime skills, and restricted tool sets.
  * `Runtime`, `DshExecutor`, `MasterAssessor`, `Settings`, and management routes/tools use it to ensure sessions, deliver deduplicated messages via `AgentDelivery`, and process ordered `relay` and `notice` effects.
@@ -282,9 +284,11 @@ export class Sessions {
     const superagent = this.host.store.team.superagents.get(id)
     if (!superagent) return ''
     const capabilities = superagent.capabilities?.length ? `\nCapabilities: ${superagent.capabilities.join('; ')}` : ''
-    const persona = superagent.persona?.trim() ? `\n\n${superagent.persona.trim()}` : ''
+    // The persona is the seed of AGENTS.md, which DSH injects from the working directory; naming it here too would say it twice.
     const skills = superagent.skills?.length ? `\nSkills bound to you, read with the skill tool: ${superagent.skills.join(', ')}` : ''
-    return `\n\nYou are ${superagent.name} (${superagent.role}).${capabilities}${skills}${persona}`
+    const repository = superagent.repository ? `\nGitHub repository you watch: ${superagent.repository}` : ''
+    const feishu = superagent.feishuCli ? `\nYour Feishu bot CLI: ${superagent.feishuCli}` : ''
+    return `\n\nYou are ${superagent.name} (${superagent.role}).${capabilities}${skills}${repository}${feishu}`
   }
   /** The superagent identity of `agent`'s Session, or undefined when it is not a superagent Session. */
   private superagentOf(agent: Agent): Superagent | undefined {
@@ -327,14 +331,15 @@ export class Sessions {
     const store = this.host.store
     const parent = scopeParentOf(agent)
     const present = (name: string) => agent.ctx.tools.get(name) !== undefined || agent.ctx.tools.get(name, parent) !== undefined
-    const allow = [...WORK_TOOLS, 'superagent_team_report', 'superagent_team_message', 'superagent_delegate'].filter(present)
+    const allow = [...WORK_TOOLS, 'superagent_team_report', 'superagent_team_message', 'superagent_team_read', 'superagent_delegate'].filter(present)
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(execution => {
       const member = store.team.superagents.get(superagentId)
       if (!member || !superagentActive(member)) return 'This superagent is disabled; new work waits until it is enabled'
       const working = store.team.teams.list().some(team => store.team.tasks.list(team.id)
         .some(task => task.assigneeId === superagentId && task.state === 'working' && task.turn && task.turn.state !== 'ended'))
-      // Talk needs no task: a message still reaches an idle member, who answers it and reads the team.
-      if (working || execution.name === 'superagent_team_message' || execution.name === 'superagent_team_read') return undefined
+      // Talk needs no task: an idle member still answers a message it was mentioned in, and reads the team, but can only
+      // delegate while it has a task of its own.
+      if (working || TALK_TOOLS.has(execution.name)) return undefined
       return 'No team task is running; new work needs a task the lead proposed and dispatched. Answer a message with superagent_team_message.'
     })]
   }

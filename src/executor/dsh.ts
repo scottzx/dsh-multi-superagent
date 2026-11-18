@@ -4,7 +4,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { key, latestAssignment, latestReport, liveTicket, runningAssignment, superagentWorkspace, threadKey, waitsForPerson } from '../core/index.ts'
+import { key, latestAssignment, latestReport, liveTicket, runningAssignment, superagentWorkspace, threadKey, waitsForPerson,
+  type InboxBatch } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, EngineForSuperagentRunner, Execution, Executor, Mandate, PolicyEffect,
   SuperagentRunner, Team, TeamMessage, TeamTask, Ticket, TicketInput, Trigger } from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
@@ -24,6 +25,8 @@ const now = (): string => new Date().toISOString()
 export const workerSessionId = (ticketId: string): string => `worker-${ticketId}`
 /** Returns the ticket ID for a worker session ID (`worker-<ticketId>`), or undefined for non-worker sessions. */
 export const ticketOfSession = (sessionId: string): string | undefined => sessionId.startsWith('worker-') ? sessionId.slice('worker-'.length) : undefined
+/** How long a member's mentions are gathered before one batch is delivered, so a burst is read at once rather than one by one. */
+export const INBOX_DEBOUNCE_MS = 2000
 /** Returns the superagent session ID (`superagent-<superagentId>`) for a superagent identity. */
 export const superagentSessionId = (superagentId: string): string => `superagent-${superagentId}`
 /** Returns the superagent ID for a superagent session ID (`superagent-<superagentId>`), or undefined for other sessions. */
@@ -35,6 +38,26 @@ export function superagentTaskMessage(team: Team, task: TeamTask, messages: Team
   return JSON.stringify({ team_id: team.id, team_name: team.name, task_id: task.id, assignee_id: task.assigneeId, task: task.text,
     outputs: task.outputs, after: task.after, ...talk.length ? { talk: talk.map(message => `${message.from}: ${message.text}`) } : {},
     ...reports.length ? { reports } : {} })
+}
+/**
+ * Builds the one message that carries a bot's inbox: every group it was mentioned in, the talk of each group around those
+ * mentions, and the mentions themselves. A bot reads one batch whatever happened across its groups, so several groups and
+ * several people mentioning it at once cost one turn rather than one each.
+ */
+export function inboxMessage(batch: InboxBatch, lead = false): string {
+  const tool = lead ? 'lead_team_message' : 'superagent_team_message'
+  return JSON.stringify({
+    kind: 'team_inbox',
+    batch_id: batch.batchId,
+    teams: batch.teams.map(group => ({
+      team_id: group.teamId,
+      team_name: group.teamName,
+      ...group.omitted ? { omitted: group.omitted } : {},
+      context: group.context.map(message => ({ id: message.id, from: message.from, text: message.text, at: message.at })),
+      mentions: group.mentions.map(message => ({ id: message.id, from: message.from, text: message.text, at: message.at, kind: message.kind })),
+    })),
+    note: `You were mentioned in these groups. Answer each group with ${tool}; only its at argument wakes anyone, so writing @ wakes nobody. Do not poll, do not reply across groups, and do not report a task.`,
+  })
 }
 /** Maximum runtime for a workspace prepare command. */
 const PREPARE_TIMEOUT_MS = 10 * 60_000
@@ -705,6 +728,8 @@ export interface SuperagentRunnerHost {
   /** Session manager for superagent Sessions. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt'>
   readonly machine: Pick<Machine, 'stateDir'>
+  /** The main Session, which is the lead's Session: a mention of the lead is delivered there, not to a superagent Session. */
+  readonly masterId?: string
   readonly lifetime: AbortSignal
   closing(): boolean
   /** Whether processing is paused, which holds superagent launches and deliveries. */
@@ -722,18 +747,18 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
   constructor(private readonly host: SuperagentRunnerHost) {
     host.effects.handle('superagent-launch', payload => this.launch(payload), { limit: () => host.paused() ? 0 : 4, retry: [5000, 300_000] })
     host.effects.handle('superagent-delivery', payload => this.deliverTurn(payload), { limit: () => host.paused() ? 0 : 4, retry: [2000, 60_000], quiet: true })
+    // One wake per member, retried at the debounce window: a burst of mentions settles into a single batch.
+    host.effects.handle('superagent-inbox', payload => this.wakeInbox(payload), { limit: () => host.paused() ? 0 : 8, retry: [INBOX_DEBOUNCE_MS, 60_000], quiet: true })
   }
   /** Enqueues a `superagent-launch` effect to start a superagent's turn on a team task. */
   start(team: Team, task: TeamTask): void { this.host.effects.enqueue('superagent-launch', task.id, { teamId: team.id, taskId: task.id }) }
   /** Enqueues a `superagent-delivery` effect to steer a team's new messages into a running superagent turn. */
   deliver(team: Team, task: TeamTask): void { this.host.effects.enqueue('superagent-delivery', task.id, { teamId: team.id, taskId: task.id }) }
   /**
-   * Delivers a team's message to a member with no working task, so talk does not wait for a dispatched task. The message is
-   * already on the team record; this only wakes the member's Session to read it.
+   * Wake a member because mentions of it wait in its inbox: one effect per member, deduplicated by its id, so several groups
+   * and several people mentioning the same bot at once produce one batch rather than one turn each.
    */
-  talk(team: Team, memberId: string, message: TeamMessage): void {
-    this.host.effects.enqueue('superagent-delivery', `talk:${memberId}:${message.id}`, { teamId: team.id, taskId: message.id, memberId })
-  }
+  wake(botId: string): void { this.host.effects.enqueue('superagent-inbox', botId, { botId }) }
   /** Cancels a superagent turn; the task's end has already been recorded in the domain. */
   stop(team: Team, task: TeamTask, _reason: string): void {
     this.host.store.afterCommit(() => {
@@ -757,9 +782,7 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     this.host.engine.superagentStarted(teamId, taskId)
     this.host.engine.superagentDelivered(teamId, taskId)
   }
-  private async deliverTurn({ teamId, taskId, memberId }: { teamId: string; taskId: string; memberId?: string }): Promise<void> {
-    // Talk to a member with no working task: wake its Session with the one message, which starts no task.
-    if (memberId) return this.deliverTalk(teamId, memberId, taskId)
+  private async deliverTurn({ teamId, taskId }: { teamId: string; taskId: string }): Promise<void> {
     const team = this.host.store.team.teams.get(teamId)
     const task = team && this.host.store.team.tasks.get(taskId)
     if (!team || !task || task.teamId !== teamId || !task.turn || task.turn.state === 'ended') return
@@ -774,32 +797,57 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
       messages.map(message => `${message.from}: ${message.text}`).join('\n'), 'steer')
     this.host.engine.superagentDelivered(teamId, taskId)
   }
-  /** Wake an idle member's Session with one team message. A member that has since taken a task reads it with that task. */
-  private async deliverTalk(teamId: string, memberId: string, messageId: string): Promise<void> {
-    const team = this.host.store.team.teams.get(teamId)
-    const message = team && this.host.store.team.messages.get(messageId)
-    if (!team || !message || message.teamId !== teamId || !team.memberIds.includes(memberId)) return
-    const busy = this.host.store.team.tasks.list(teamId).some(task => task.assigneeId === memberId && task.state === 'working'
-      && task.turn && task.turn.state !== 'ended')
-    if (busy) return
-    const sessionId = superagentSessionId(memberId)
-    const workspace = superagentWorkspace(this.host.store.team.superagents.get(memberId), this.host.machine.stateDir)
-    if (!this.host.context.agents.get(sessionId as SessionId)) await this.host.sessions.ensure(sessionId, workspace, `${team.name} · ${memberId}`, 'superagent')
-    await this.host.sessions.prompt(sessionId, `superagent-talk:${message.id}`,
-      JSON.stringify({ team_id: team.id, team_name: team.name, kind: 'team_message', from: message.from, text: message.text,
-        note: 'This is talk, not a dispatched task. Answer with superagent_team_message; do not report a task.' }), 'steer')
+  /**
+   * Deliver a bot's pending mentions as one batch. A bot that is still busy leaves them in its inbox: the mentions wait for the
+   * bot to be free rather than being steered into a turn that is already working. A mention that just arrived waits
+   * `INBOX_DEBOUNCE_MS` first, so nearly simultaneous mentions merge into one batch instead of one turn each; this effect's
+   * retry delay is that same window.
+   */
+  private async wakeInbox({ botId }: { botId: string }): Promise<void> {
+    if (this.host.closing() || this.host.paused()) throw new Later('Processing is paused')
+    const superagent = this.host.store.team.superagents.get(botId)
+    if (!superagent || superagent.role === 'human' || superagent.disabled) return
+    // A bot in the middle of a task reads its inbox with that task; it is woken again when it is free.
+    const busy = this.host.store.team.teams.list().some(team => this.host.store.team.tasks.list(team.id)
+      .some(task => task.assigneeId === botId && task.state === 'working' && !!task.turn && task.turn.state !== 'ended'))
+    if (busy) throw new Later('The bot is busy with a task')
+    const first = this.host.store.team.inbox.list(botId, 'pending')[0]
+    if (!first) return
+    // Hold the batch open for one window from the first pending mention, so a burst of mentions becomes one batch.
+    if (Date.now() - Date.parse(first.at) < INBOX_DEBOUNCE_MS) throw new Later('Waiting for mentions to settle')
+    const batch = this.host.engine.takeBatch(botId)
+    if (!batch) return
+    const team = this.host.store.team.teams.get(batch.teams[0]!.teamId)
+    // The lead is the main Session, so a mention of it is queued there, alongside candidates and worker reports, rather than
+    // starting a second Session that would not have the lead's tools.
+    if (superagent.role === 'lead' && this.host.masterId) {
+      await this.host.sessions.prompt(this.host.masterId, `superagent-inbox:${batch.batchId}`, inboxMessage(batch, true), 'queue',
+        () => { if (this.host.closing()) throw new Error('dsh-superagent stopped before its inbox was delivered') })
+      this.host.engine.deliverBatch(botId, batch)
+      return
+    }
+    const sessionId = superagentSessionId(botId)
+    const workspace = superagentWorkspace(superagent, this.host.machine.stateDir)
+    await this.host.sessions.ensure(sessionId, workspace, `${team?.name ?? botId} · ${botId}`, 'superagent')
+    await this.host.sessions.prompt(sessionId, `superagent-inbox:${batch.batchId}`, inboxMessage(batch), 'queue',
+      () => { if (this.host.closing()) throw new Error('dsh-superagent stopped before its inbox was delivered') })
+    this.host.engine.deliverBatch(botId, batch)
   }
   private alive(teamId: string, taskId: string): boolean {
     const task = this.host.store.team.tasks.get(taskId)
     return !!task && task.teamId === teamId && task.state === 'working' && !!task.turn && task.turn.state !== 'ended'
   }
-  /** Ends a superagent turn whose Session went idle without a report. */
+  /**
+   * A superagent Session went idle: end the task turn it was running, then wake it again for anything that was mentioned while
+   * it was busy. Mentions that arrived during a task wait in the inbox, so this is what makes them reach the bot.
+   */
   private idle(superagentId: string): void {
     for (const team of this.host.store.team.teams.list()) {
       const task = this.host.store.team.tasks.list(team.id).find(item => item.assigneeId === superagentId && item.state === 'working'
         && item.turn && item.turn.state !== 'ended')
-      if (task) { this.host.engine.superagentTurnEnded(team.id, task.id); return }
+      if (task) { this.host.engine.superagentTurnEnded(team.id, task.id); break }
     }
+    if (this.host.store.team.inbox.list(superagentId, 'pending').length) this.wake(superagentId)
   }
   /** Subscribes to host agent events so an idle superagent turn is recorded. Call once at startup. */
   install(): void {

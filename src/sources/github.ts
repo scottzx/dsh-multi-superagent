@@ -41,8 +41,8 @@ export const githubKind: SourceKind<GithubConfig> = {
   description: { zh: '智能体的 GitHub 账号；接收仓库里发给它的通知、已订阅 Issue 与 PR 的讨论、CI 状态变化和 PR 合并关闭。', en: 'The agent\'s GitHub accounts; receives notifications to it in the repository, discussion on subscribed Issues and PRs, CI changes, and PR merge or close.' },
   schema: GithubConfigSchema,
   fields: [
-    { key: 'repository', type: 'text', pattern: '[A-Za-z0-9_.\\-]+/[A-Za-z0-9_.\\-]+', label: { zh: '监听的仓库', en: 'Repository' },
-      hint: { zh: '写作 owner/name。这个来源接收这个仓库的通知和讨论；保存时检查智能体账号能否推送到它，然后重启 dsh-superagent。', en: 'Written owner/name. This Source receives the repository\'s notifications and discussion; saving checks that the agent account can push to it, then restarts dsh-superagent.' } },
+    { key: 'repository', type: 'text', pattern: '([A-Za-z0-9_.\\-]+/[A-Za-z0-9_.\\-]+)?', label: { zh: '监听的仓库（可选）', en: 'Repository (optional)' },
+      hint: { zh: 'owner/name，可留空。专业 superagent 的仓库也会被监测。', en: 'owner/name, optional. A specialist\'s repository is watched too.' } },
     { key: 'cli', type: 'text', label: { zh: '智能体的 GitHub CLI', en: 'Agent GitHub CLI' },
       hint: { zh: '命令名或绝对路径，通常是用 GH_CONFIG_DIR 登录智能体账号的 gh 包装脚本。智能体以它登录的账号行事，执行器以 gh 调用它。保存时检查它登录的账号能否推送到仓库，然后重启 dsh-superagent。', en: 'A command name or absolute path, usually a gh wrapper signed in to the agent account through GH_CONFIG_DIR. The agent acts as the account it is signed in to, and the Executor calls it as gh. Saving checks that this account can push to the repository, then restarts dsh-superagent.' } },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
@@ -99,11 +99,11 @@ export const githubKind: SourceKind<GithubConfig> = {
     ],
     values: ({ deployment, trigger }) => {
       const number = trigger?.threads[0]?.source === SOURCE ? Number(trigger.meta.number) || 0 : 0
-      return { DSH_SUPERAGENT_GITHUB_REPOSITORY: deployment.repository, DSH_SUPERAGENT_GITHUB_ACCOUNT: deployment.github.login, DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL: deployment.github.noreply, DSH_SUPERAGENT_GITHUB_NUMBER: number ? String(number) : '',
+      return { DSH_SUPERAGENT_GITHUB_REPOSITORY: deployment.repository, DSH_SUPERAGENT_GITHUB_ACCOUNT: deployment.github?.login ?? '', DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL: deployment.github?.noreply ?? '', DSH_SUPERAGENT_GITHUB_NUMBER: number ? String(number) : '',
         DSH_SUPERAGENT_GITHUB_PR_HEAD: number && trigger?.meta.isPr === true ? `refs/pull/${number}/head` : '' }
     },
   },
-  facts: (deployment): Record<string, Localized | string> => deployment ? {
+  facts: (deployment): Record<string, Localized | string> => deployment?.github ? {
     cli: { zh: `当前账号 @${deployment.github.login}`, en: `Current account @${deployment.github.login}` },
   } : {},
 }
@@ -133,7 +133,8 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   while (!signal.aborted) {
     const config = ctx.config<GithubConfig>(SOURCE)
     try {
-      if (config) interval = await pollRound(ctx, signal)
+      if (!ctx.deployment.github || !ctx.repositories().length) ctx.report('github', health('paused', 'githubOff'))
+      else if (config) interval = await pollRound(ctx, signal)
       else ctx.report('github', health('paused', 'sourceOff'))
       failures = 0
     } catch (error) {
@@ -176,17 +177,36 @@ const STREAMS = [
   { id: 'review-comments', observed: (config: GithubConfig) => config.observeComments, path: 'pulls/comments?' },
 ] as const
 /** Polls repository-wide streams (new Issues/PRs, comments, default-branch CI); each stream reads from when it was switched on, resets when switched off, and fails independently. */
+const watching = (ctx: SourceContext, repository: string): SourceContext => ({ ...ctx, commands: ctx.commands.forRepository(repository) })
+/** Polls every watched repository's notifications before moving the shared cursor, so a later repository is not skipped. */
+async function pollWatched(ctx: SourceContext, round: Round): Promise<{ count: number; interval: number }> {
+  let count = 0
+  let interval = 60
+  for (const repository of ctx.repositories()) {
+    const one = await pollNotifications(watching(ctx, repository), round)
+    count += one.count
+    interval = Math.max(interval, one.interval)
+    if (stopped(ctx, round)) return { count, interval }
+  }
+  ctx.state.set(KV.github.since, cursorAt(round.started))
+  return { count, interval }
+}
 async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
   const config = ctx.config<GithubConfig>(SOURCE)
   if (!config) return
+  for (const repository of ctx.repositories()) await pollOneRepository(watching(ctx, repository), round, config)
+}
+async function pollOneRepository(ctx: SourceContext, round: Round, config: GithubConfig): Promise<void> {
+  const repository = ctx.commands.repository
   for (const stream of STREAMS) {
     if (stopped(ctx, round)) return
-    if (!stream.observed(config)) { ctx.state.set(KV.github.stream(stream.id), undefined); continue }
-    try { await readStream(ctx, round, stream.id, stream.path, config) }
-    catch (error) { if (!stopped(ctx, round)) round.failures.push(`${stream.id}: ${String(error)}`) }
+    const id = repository === ctx.deployment.repository ? stream.id : `${repository}:${stream.id}`
+    if (!stream.observed(config)) { ctx.state.set(KV.github.stream(id), undefined); continue }
+    try { await readStream(ctx, round, id, stream.path, config) }
+    catch (error) { if (!stopped(ctx, round)) round.failures.push(`${repository} ${stream.id}: ${String(error)}`) }
   }
-  // When CI observation is turned off, clear the failure baseline but preserve the revision counter so future triggers have unique IDs.
-  if (!config.observeCi) {
+  // Default-branch CI stays with the deployment repository. A specialist's repository is watched through notifications and the streams above.
+  if (!config.observeCi || repository !== ctx.deployment.repository) {
     const seen = ctx.state.get(KV.github.branchCi)
     ctx.state.set(KV.github.branchCi, seen && { revision: seen.revision })
     return
@@ -218,7 +238,7 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
   }
   const { headers, body } = included(raw)
   const items = validItems(ListedSchema, z.array(z.unknown()).parse(JSON.parse(body)), round.tally)
-  const { login } = ctx.deployment.github
+  const login = ctx.deployment.github?.login ?? ''
   const fresh = (at: string | null | undefined, kind: string) =>
     kind in started && Date.parse(at ?? '') >= Math.max(Date.parse(started[kind]!), horizon)
   for (const item of items) {
@@ -279,7 +299,7 @@ async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
  */
 export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promise<number> {
   const round = newRound(signal)
-  const notified = await pollNotifications(ctx, round).then(value => ({ value }), (error: unknown) => ({ error }))
+  const notified = await pollWatched(ctx, round).then(value => ({ value }), (error: unknown) => ({ error }))
   await pollRepository(ctx, round)
   await pollTicketPulls(ctx, signal, round)
   await pollThreads(ctx, signal, round)
@@ -300,7 +320,7 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
   const commands = ctx.commands.withSignal(round.signal)
   const since = state.get(KV.github.since) ?? round.started
   if (state.get(KV.github.since) === undefined) state.set(KV.github.since, since)
-  const { repository } = ctx.deployment
+  const repository = ctx.commands.repository
   const path = `notifications?all=true&per_page=50&since=${encodeURIComponent(since)}`
   const raw = await commands.api(path, '--include')
   const split = raw.search(/\r?\n\r?\n/)
@@ -338,7 +358,7 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
       delete retries[number]
     }
   }
-  ctx.atomic(() => { state.set(KV.github.since, cursorAt(round.started)); state.set(KV.github.retries, retries) })
+  ctx.atomic(() => { state.set(KV.github.retries, retries) })
   return { count: notifications.length, interval }
 }
 async function readNotified(ctx: SourceContext, round: Round, number: number, item: Retry): Promise<void> {
@@ -351,7 +371,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
     if (!isPr) {
       // An Issue opened by someone other than the agent since the cursor brings its body so a mention in it reaches the gate.
       // A mention added by a later edit to the body is not read: only the author can be the actor of the body.
-      const { login } = ctx.deployment.github
+      const login = ctx.deployment.github?.login ?? ''
       const opened = Date.parse(issue.created_at) >= Date.parse(since) && !sameName(issue.user.login, login)
       if (opened) await ctx.receive(issueTrigger(issue, login))
       await intakeComments(ctx, { number, isPr: false, url: issue.html_url }, since, round)
@@ -361,7 +381,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
   if (isPr) {
     const pr = await pull(ctx, round, number)
     // Emit a PR description trigger for PRs opened since the cursor; its ID is the same as the one produced by the repository PR stream.
-    const { login } = ctx.deployment.github
+    const login = ctx.deployment.github?.login ?? ''
     if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since) && !sameName(pr.user.login, login)) {
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
       await ctx.receive(pullTrigger(opened, login))
@@ -383,7 +403,7 @@ function pull(ctx: SourceContext, round: Round, number: number): Promise<Pull> {
 }
 async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, round: Round): Promise<void> {
   const commands = ctx.commands.withSignal(round.signal)
-  const { login } = ctx.deployment.github
+  const login = ctx.deployment.github?.login ?? ''
   const kinds = ref.isPr ? ['conversation', 'inline', 'review'] as const : ['conversation'] as const
   for (const kind of kinds) {
     const suffix = `&since=${encodeURIComponent(since)}`

@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 /** Domain model of a proactive agent: the concepts and their invariants, independent of any source, policy, or executor. */
 import type { Reason } from './reasons.ts'
 
@@ -322,8 +323,11 @@ export interface Ticket {
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
 export interface Execution { name: string; directory: string; assignment: string }
 
-/** A superagent is a first-class agent identity in the domain: the lead, or a professional superagent. */
-export type SuperagentRole = 'lead' | 'specialist'
+/**
+ * A superagent is a first-class agent identity in the domain: the lead, a professional superagent, or the person in the
+ * team chat. A `human` member runs no Session: it is one fixed person (`me`), and its messages are what wake the others.
+ */
+export type SuperagentRole = 'lead' | 'specialist' | 'human'
 export interface Superagent {
   id: string
   name: string
@@ -345,15 +349,38 @@ export interface Superagent {
    * the runner falls back to the machine's state directory.
    */
   directory?: string
+  /**
+   * The GitHub repository this superagent watches, `owner/name`. Optional: a specialist with none is not part of GitHub
+   * monitoring. The deployment's own repository, when set, is watched as well.
+   */
+  repository?: string
+  /** This superagent's own Feishu bot CLI. Optional: a specialist without one uses the deployment bot, if there is one. */
+  feishuCli?: string
   createdAt: string
 }
 /** Whether a superagent may take a turn or a message: it has not been disabled. */
 export const superagentActive = (superagent: Pick<Superagent, 'disabled'>): boolean => !superagent.disabled
-/** The directory a superagent's Session runs in: its bound project directory, or `fallback` when it has none. */
+/**
+ * The directory a superagent's Session runs in: its bound project directory, or its own directory under `fallback` when the
+ * lead bound none. One directory per superagent matters beyond tidiness: DSH injects the `AGENTS.md` of the working directory
+ * into the Session, so a shared directory would give every superagent the same one.
+ */
 export const superagentWorkspace = (superagent: Superagent | undefined, fallback: string): string =>
-  superagent?.directory?.trim() ? superagent.directory.trim() : fallback
+  superagent?.directory?.trim() ? superagent.directory.trim()
+    : superagent === undefined ? fallback : join(fallback, 'superagents', superagent.id)
 /** A team is a conversation between superagents: a group of several, or a direct conversation between two. */
 export type TeamKind = 'group' | 'direct'
+/** The most bot members a group may have, the lead included; the person is added on top of them. */
+export const TEAM_BOT_LIMIT = 6
+/** The most members one message may mention, so a single line cannot fan out to the whole team. */
+export const TEAM_MENTION_LIMIT = 5
+/** The most turns of bot-to-bot mentions allowed between two human messages before the group pauses itself. */
+export const TEAM_HOP_LIMIT = 30
+/**
+ * The id of the deployment's standing all-hands group: every bot belongs to it, so the lead dispatches to anyone without
+ * building a group first. Its name is the panel's own wording, not this one.
+ */
+export const ALL_HANDS_ID = 'all-hands'
 export interface Team {
   id: string
   name: string
@@ -363,6 +390,13 @@ export interface Team {
   leadId?: string
   createdAt: string
   closed?: { at: string; by: string; summary: string }
+  /**
+   * The mentions counted since the person last spoke. A bot that mentions another bot adds one; when it reaches
+   * `TEAM_HOP_LIMIT` the group pauses, so two bots cannot talk to each other without end.
+   */
+  hops?: number
+  /** Why the group stopped waking members: its mention chain ran too long, or a person paused it. */
+  paused?: { at: string; reason: 'hops' | 'manual' }
 }
 /** What a team message says: a discussion line, a proposed or dispatched task, a report, a closing decision, or a notice. */
 export type TeamMessageKind = 'discussion' | 'task' | 'report' | 'decision' | 'notice'
@@ -371,13 +405,38 @@ export interface TeamMessage {
   teamId: string
   from: string
   text: string
+  /** When the message was said. */
   at: string
   kind: TeamMessageKind
+  /**
+   * The members this message mentions, from the `at` argument of the tool that sent it. A mention is what wakes a member:
+   * naming someone in `text` wakes nobody, because the text is never searched for mentions.
+   */
+  mentions?: string[]
+  /** The message this one answers. */
+  replyTo?: string
   /** The task a `task` or `report` message carries. */
   taskId?: string
   /** The candidate or request a message refers to, when one exists. */
   triggerId?: string
 }
+/**
+ * One mention waiting for a superagent: a message that named it, not yet handed to it. A mention arrives here whatever the
+ * member is doing, so several groups and several people can mention one bot at once; the bot reads them together, in one
+ * batch, when it is next free to act.
+ */
+export interface InboxItem {
+  botId: string
+  messageId: string
+  teamId: string
+  /** When the mention arrived, which orders the inbox. */
+  at: string
+  state: 'pending' | 'delivered'
+  /** The batch that carried it, once it was delivered. */
+  batchId?: string
+}
+/** How far a member has read one group, so a batch can bring the talk around its mentions without repeating it. */
+export interface TeamCursor { teamId: string; memberId: string; readAt: string }
 /** A superagent's turn on a team task, shaped like an Assignment. */
 export interface SuperagentTurn {
   id: string

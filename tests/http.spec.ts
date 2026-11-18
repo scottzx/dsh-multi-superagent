@@ -96,3 +96,61 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
     body: { error: `Request exceeds ${128 * 1024} bytes` } })
   expect(saves).toEqual([])
 })
+
+/** A team of one lead, one specialist and the person, with one message already said. */
+function chatRuntime() {
+  const messages = [{ id: 'm1', teamId: 't1', from: 'me', text: 'hello', at: '2026-09-23T00:01:00Z', kind: 'discussion' }]
+  const said: unknown[] = []
+  const paused: unknown[] = []
+  const runtime = {
+    store: { team: {
+      teams: { get: (id: string) => id === 't1' ? { id: 't1', name: 'T1', kind: 'group', memberIds: ['me', 'lead', 'a'], leadId: 'lead', createdAt: '' } : undefined },
+      superagents: { get: (id: string) => ({ me: { id: 'me', name: 'You', role: 'human' }, lead: { id: 'lead', name: 'Lead', role: 'lead' },
+        a: { id: 'a', name: 'A', role: 'specialist' } })[id] },
+      messages: { list: () => messages },
+      tasks: { list: () => [] },
+      inbox: { list: (botId: string) => botId === 'a' ? [{ botId: 'a', messageId: 'm1', teamId: 't1', at: '', state: 'pending' }] : [] },
+    } },
+    engine: {
+      team: (id: string) => id === 't1' ? { id: 't1', kind: 'group', paused: paused.length ? { at: '', reason: 'manual' } : undefined } : undefined,
+      sendTeamMessage: (teamId: string, from: string, text: string, kind: string, options: { mentions?: string[] }) => {
+        said.push({ teamId, from, text, kind, options })
+        const message = { id: 'm2', teamId, from, text, at: '2026-09-23T00:02:00Z', kind, mentions: options.mentions }
+        messages.push(message as never)
+        return message
+      },
+      pauseTeam: (id: string) => paused.push(id),
+      resumeTeam: (id: string) => paused.pop(),
+      addTeam: (team: { name: string }) => ({ id: `team-${team.name}` }),
+    },
+  }
+  return { call: serve(runtime as never), said, paused }
+}
+
+it('lets the person speak in a group and wakes only the superagents it names', async () => {
+  const { call, said } = chatRuntime()
+  const answer = await call('POST', 'teams/t1/message', { text: 'what do you think', at: ['a'] })
+  expect(answer.status).toBe(200)
+  expect(answer.body.woke).toEqual(['a'])
+  expect(said[0]).toMatchObject({ from: 'me', text: 'what do you think', options: { mentions: ['a'] } })
+  // Naming nobody wakes nobody: the line is recorded and starts no turn.
+  const quiet = await call('POST', 'teams/t1/message', { text: 'just noting this' })
+  expect(quiet.body.woke).toEqual([])
+  expect(await call('POST', 'teams/t1/message', { text: 'hi', at: ['a', 'b', 'c', 'd', 'e', 'f'] })).toMatchObject({ status: 400 })
+})
+
+it('pulls only the messages after a point, so a chat asks for what it lacks', async () => {
+  const { call } = chatRuntime()
+  const all = await call('GET', 'teams/t1/messages')
+  expect((all.body.messages as unknown[]).length).toBe(1)
+  const after = await call('GET', 'teams/t1/messages?after=2026-09-23T00:01:30Z')
+  expect(after.body.messages).toEqual([])
+  expect(await call('GET', 'teams/nope/messages')).toMatchObject({ status: 404 })
+})
+
+it('pauses and resumes a group from the panel', async () => {
+  const { call, paused } = chatRuntime()
+  expect(await call('POST', 'teams/t1/pause', { paused: true })).toMatchObject({ status: 200, body: { paused: true } })
+  expect(paused).toEqual(['t1'])
+  expect(await call('POST', 'teams/t1/pause', { paused: false })).toMatchObject({ status: 200, body: { paused: false } })
+})

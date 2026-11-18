@@ -1,8 +1,8 @@
 /** Teams: the team of superagents — identities, conversations, tasks, and the dispatch state machine. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { openTeam, superagentActive } from './model.ts'
-import type { Superagent, SuperagentTurn, Team, TeamMessage, TeamMessageKind, TeamTask } from './model.ts'
+import { ALL_HANDS_ID, TEAM_BOT_LIMIT, TEAM_HOP_LIMIT, TEAM_MENTION_LIMIT, openTeam, superagentActive } from './model.ts'
+import type { InboxItem, Superagent, SuperagentTurn, Team, TeamMessage, TeamMessageKind, TeamTask } from './model.ts'
 import type { Reason } from './reasons.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { SuperagentRunner } from './ports.ts'
@@ -12,6 +12,10 @@ const busy = (team: Team, tasks: TeamTask[], memberId: string): boolean =>
   tasks.some(task => task.assigneeId === memberId && task.state === 'working' && task.turn && task.turn.state !== 'ended')
 /** A SuperagentRunner that does nothing, for an Engine that never dispatches a team. */
 const NOOP_SUPERAGENT: SuperagentRunner = { start() {}, deliver() {}, stop() {} }
+/** The fixed id of the person in a team chat; there is one, and it runs no Session. */
+export const HUMAN_ID = 'me'
+/** The name the standing all-hands group is stored under; the panel shows its own wording for it. */
+export const ALL_HANDS_NAME = 'All-hands'
 
 /**
  * The `Teams` part owns the team of superagents.
@@ -23,6 +27,8 @@ const NOOP_SUPERAGENT: SuperagentRunner = { start() {}, deliver() {}, stop() {} 
  * Ticket under a team mandate. It writes every team record itself; the `SuperagentRunner` only reports facts about turns back.
  */
 export class Teams extends EnginePart {
+  /** The deployment's own lead, registered by `ensureLead`; it leads the all-hands group. */
+  private deploymentLead?: string
   constructor(options: EngineOptions, private readonly tickets: Tickets) { super(options) }
 
   // Superagents and teams
@@ -34,7 +40,66 @@ export class Teams extends EnginePart {
     const value = { ...superagent, createdAt: superagent.createdAt || at }
     this.repo.team.superagents.save(value)
     this.emit('superagent.added', { superagentId: value.id })
+    // A new bot joins the standing all-hands group, so the lead dispatches to it without building a group first.
+    if (value.role !== 'human') this.ensureAllHands()
     return value
+  }
+  /**
+   * The standing all-hands group: every bot belongs to it, so the lead dispatches to anyone in one step. It appears with the
+   * first bot that can lead it, and holds every bot registered so far; a bot registered later joins it. The person is a member
+   * too, because the person speaks there.
+   *
+   * Its lead is the deployment's own lead: the main Session's identity, which the plugin registers at startup, or the first
+   * lead-role bot when the main Session holds none. A closed group is not reopened here: only the person reopens a group, by
+   * speaking in it.
+   */
+  ensureAllHands(): Team | undefined {
+    const bots = this.superagents().filter(superagent => superagent.role !== 'human')
+    const lead = this.allHandsLead(bots)
+    if (!lead) return undefined
+    const memberIds = [...bots.map(superagent => superagent.id), ...this.humanIds()]
+    const current = this.repo.team.teams.get(ALL_HANDS_ID)
+    if (!current) {
+      const value: Team = { id: ALL_HANDS_ID, name: ALL_HANDS_NAME, kind: 'group', memberIds, leadId: lead.id, createdAt: this.now() }
+      this.repo.team.teams.save(value)
+      this.emit('team.created', { teamId: value.id })
+      return value
+    }
+    // The group keeps the lead it has while a round runs under it; otherwise the deployment's lead takes it over.
+    const leadId = current.leadId && current.leadId !== lead.id && this.roundOpen(current.id) ? current.leadId : lead.id
+    const added = memberIds.filter(id => !current.memberIds.includes(id))
+    if (!added.length && leadId === current.leadId) return current
+    const next: Team = { ...current, memberIds: [...current.memberIds, ...added], leadId }
+    this.repo.team.teams.save(next)
+    this.emit('team.members.added', { teamId: next.id, memberIds: added })
+    return next
+  }
+  /** The all-hands group's lead: the deployment's own lead when it is registered, else the first lead-role bot. */
+  private allHandsLead(bots: readonly Superagent[]): Superagent | undefined {
+    const deploymentLead = this.deploymentLead ?? this.options.leadId
+    if (deploymentLead) {
+      const found = bots.find(superagent => superagent.id === deploymentLead)
+      if (found) return found
+    }
+    return bots.find(superagent => superagent.role === 'lead')
+  }
+  /** Whether a team has a round in flight: a task proposed, waiting or working. */
+  private roundOpen(teamId: string): boolean {
+    return this.tasks(teamId).some(task => task.state === 'proposed' || task.state === 'waiting' || task.state === 'working')
+  }
+  /**
+   * The main Session's identity as a bot of the team, so the lead is a member of the groups it dispatches in and its mentions
+   * arrive in its own Session. Created once at startup; an identity registered under the same id keeps the name and persona a
+   * person gave it. `directory` is where the main Session works, so its brief is the one of that directory.
+   */
+  ensureLead(id: string, directory?: string): Superagent {
+    this.deploymentLead = id
+    const existing = this.repo.team.superagents.get(id)
+    if (existing) return existing
+    const lead: Superagent = { id, name: 'Orchestrator', role: 'lead', ...directory ? { directory } : {}, createdAt: this.now() }
+    this.repo.team.superagents.save(lead)
+    this.emit('superagent.added', { superagentId: lead.id })
+    return lead
   }
   /**
    * Change a superagent's persona, skills, directory or disabled state. A field left out is kept; `null` clears it.
@@ -53,6 +118,10 @@ export class Teams extends EnginePart {
     else if (change.skills) next.skills = [...change.skills]
     if (change.directory === null) delete next.directory
     else if (change.directory !== undefined) next.directory = change.directory
+    if (change.repository === null) delete next.repository
+    else if (change.repository !== undefined) next.repository = change.repository
+    if (change.feishuCli === null) delete next.feishuCli
+    else if (change.feishuCli !== undefined) next.feishuCli = change.feishuCli
     if (change.disabled === null) delete next.disabled
     else if (change.disabled) next.disabled = change.disabled
     this.repo.team.superagents.save(next)
@@ -61,17 +130,53 @@ export class Teams extends EnginePart {
   }
   /** Every superagent identity, oldest first. */
   superagents(): Superagent[] { return this.repo.team.superagents.list() }
-  /** Create a team conversation. @throws UserError when the id is taken, a member is unknown, or a group has no lead in it. */
+  /**
+   * Create a team conversation. A group needs a lead among its members, and that lead is a bot: the person can speak in any
+   * group but is not the admission authority. A group may hold at most `TEAM_BOT_LIMIT` bots; the person is added to every new
+   * team, so it can be spoken to in it.
+   * @throws UserError when the id is taken, a member is unknown, a group has no lead in it, or a group has too many bots.
+   */
   addTeam(team: Team): Team {
     const at = this.now()
     if (this.repo.team.teams.get(team.id)) throw new UserError('teamExists')
     for (const memberId of team.memberIds) if (!this.repo.team.superagents.get(memberId)) throw new UserError('unknownSuperagent', { superagent: memberId })
-    if (team.kind === 'group' && (team.leadId === undefined || !team.memberIds.includes(team.leadId))) throw new UserError('teamLeadMissing')
-    const value = { ...team, createdAt: team.createdAt || at }
+    if (team.kind === 'group' && (team.leadId === undefined || !team.memberIds.includes(team.leadId) || this.isHuman(team.leadId))) throw new UserError('teamLeadMissing')
+    const bots = team.memberIds.filter(memberId => this.repo.team.superagents.get(memberId)?.role !== 'human')
+    // The standing all-hands group holds every bot of the deployment, so the bot limit does not apply to it.
+    if (team.id !== ALL_HANDS_ID && bots.length > TEAM_BOT_LIMIT) throw new UserError('teamTooLarge', { limit: String(TEAM_BOT_LIMIT) })
+    const members = [...team.memberIds, ...this.humanIds().filter(id => !team.memberIds.includes(id))]
+    const value = { ...team, memberIds: members, createdAt: team.createdAt || at }
     this.repo.team.teams.save(value)
     this.emit('team.created', { teamId: value.id })
     return value
   }
+  /**
+   * The person's identity, created once at startup so a group can always include it. The person runs no Session: it stands
+   * for whoever is typing in the panel, and its messages are what wake the bots and resume a paused group.
+   */
+  ensureHuman(): Superagent {
+    const existing = this.repo.team.superagents.get(HUMAN_ID)
+    if (existing) { this.joinTeams(existing.id); return existing }
+    const at = this.now()
+    const human: Superagent = { id: HUMAN_ID, name: 'You', role: 'human', createdAt: at }
+    this.repo.team.superagents.save(human)
+    this.emit('superagent.added', { superagentId: human.id })
+    this.joinTeams(human.id)
+    return human
+  }
+  /**
+   * Add the person to every team that lacks it, so a team created before the person existed can still be spoken to. Nothing else
+   * about the team changes, and a team that already has it is left alone.
+   */
+  private joinTeams(humanId: string): void {
+    for (const team of this.repo.team.teams.list()) {
+      if (team.memberIds.includes(humanId)) continue
+      this.repo.team.teams.save({ ...team, memberIds: [...team.memberIds, humanId] })
+    }
+  }
+  /** Whether `id` is the person, who runs no Session. */
+  isHuman(id: string): boolean { return this.repo.team.superagents.get(id)?.role === 'human' }
+  private humanIds(): string[] { return this.repo.team.superagents.list().filter(member => member.role === 'human').map(member => member.id) }
   /** The superagent `id`, or undefined when it is unknown. */
   superagent(id: string): Superagent | undefined { return this.repo.team.superagents.get(id) }
   /** The team `id`, or undefined when it is unknown. */
@@ -86,30 +191,164 @@ export class Teams extends EnginePart {
   // Messages
 
   /**
-   * Record a message on a team and deliver it to every member whose turn runs. A group message reaches all members; a direct
-   * message reaches the recipient and the sender. `taskId` names the task a task or report message carries.
-   * @throws UserError when the team or sender is unknown, or the sender is not a member.
+   * Record a message on a team and put it in the inbox of every member it mentions. A mention is the only thing that wakes a
+   * member: naming someone in `text` wakes nobody, because the text is never searched. A message that mentions nobody is
+   * recorded for the record and read by whoever reads the group next; it starts no turn.
+   *
+   * The person speaking resumes a group that paused itself, and clears the hop count, which counts what the bots said to each
+   * other since the person last spoke.
+   *
+   * @throws UserError when the team or sender is unknown, the sender is not a member, a mention names a non-member or the
+   * sender, more than `TEAM_MENTION_LIMIT` members are mentioned, or the team is closed.
    */
-  sendMessage(teamId: string, from: string, text: string, kind: TeamMessageKind, taskId?: string, triggerId?: string): TeamMessage {
-    const team = this.teamOf(teamId)
+  sendMessage(teamId: string, from: string, text: string, kind: TeamMessageKind, options: SendOptions = {}): TeamMessage {
+    const found = this.teamOf(teamId)
+    // A close ends a round, not the conversation: the person speaking again starts the next round, and the same group goes on.
+    // A bot never reopens a closed team, so the lead's close still stops its members from starting work.
+    const reopened = !openTeam(found) && this.isHuman(from) ? this.reopen(found) : found
+    const team = reopened
+    if (!openTeam(team)) throw new UserError('teamClosed')
     if (!team.memberIds.includes(from)) throw new UserError('notAMember', { member: from })
+    const mentions = this.checkedMentions(team, from, options.mentions ?? [])
+    if (options.replyTo !== undefined && !this.messages(teamId).some(message => message.id === options.replyTo)) {
+      throw new UserError('unknownMessage', { message: options.replyTo })
+    }
     const at = this.now()
-    const message: TeamMessage = { id: key('team-message', teamId, from, at, kind, text, ...taskId ? [taskId] : [], ...triggerId ? [triggerId] : []), teamId, from, text, at, kind, ...taskId ? { taskId } : {}, ...triggerId ? { triggerId } : {} }
+    const message: TeamMessage = { id: key('team-message', teamId, from, at, kind, text, ...options.taskId ? [options.taskId] : [],
+      ...mentions.length ? [mentions.join(',')] : []), teamId, from, text, at, kind,
+      ...mentions.length ? { mentions } : {}, ...options.replyTo ? { replyTo: options.replyTo } : {},
+      ...options.taskId ? { taskId: options.taskId } : {}, ...options.triggerId ? { triggerId: options.triggerId } : {} }
     this.repo.team.messages.save(message)
     this.emit('team.message', { messageId: message.id, teamId })
-    const runner = this.runner()
-    for (const memberId of team.kind === 'direct' ? [from, ...team.memberIds.filter(id => id !== from)] : team.memberIds) {
-      if (memberId === from) continue
+    this.heard(team, from, at)
+    for (const memberId of mentions) this.repo.team.inbox.save({ botId: memberId, messageId: message.id, teamId, at, state: 'pending' })
+    // A group that is paused, or that pauses itself on this mention, records the message and wakes nobody: nothing is lost,
+    // and the chain stops where it is until the person speaks or resumes the group.
+    if (!this.hop(teamId, from, mentions)) this.wake(teamId, mentions)
+    return message
+  }
+  /**
+   * The person spoke: resume a group that paused itself, and reset the mention chain the bots have run since the person last
+   * spoke. A manual pause is not lifted by speaking, only by `resume`.
+   */
+  private heard(team: Team, from: string, at: string): void {
+    if (this.superagent(from)?.role !== 'human') return
+    const change: Team = { ...team, hops: 0 }
+    if (team.paused?.reason === 'hops') delete change.paused
+    this.repo.team.teams.save(change)
+    if (team.paused?.reason === 'hops') this.emit('team.resumed', { teamId: team.id })
+    this.repo.team.cursors.save({ teamId: team.id, memberId: from, readAt: at })
+  }
+  /**
+   * Check the members a message names: each is a member of the team, is not the sender, and is not disabled; a message names
+   * at most `TEAM_MENTION_LIMIT` members. @throws UserError naming the first mention that is not allowed.
+   */
+  private checkedMentions(team: Team, from: string, mentions: readonly string[]): string[] {
+    const unique = [...new Set(mentions)]
+    if (unique.length > TEAM_MENTION_LIMIT) throw new UserError('tooManyMentions', { limit: String(TEAM_MENTION_LIMIT) })
+    for (const memberId of unique) {
+      if (memberId === from) throw new UserError('mentionSelf')
+      if (!team.memberIds.includes(memberId)) throw new UserError('notAMember', { member: memberId })
       const member = this.superagent(memberId)
-      // The lead is the main Session, not a superagent Session, so talk never starts one for it.
-      if (!member || !superagentActive(member) || member.role === 'lead' || memberId === team.leadId) continue
-      // A working turn reads the message with its task. An idle member gets it as talk, which does not start a task, so a
-      // question does not have to be wrapped as one.
+      if (!member) throw new UserError('unknownSuperagent', { superagent: memberId })
+      if (!superagentActive(member)) throw new UserError('superagentDisabled', { superagent: memberId })
+    }
+    return unique
+  }
+  /** Open a closed group again for a new round, keeping its messages, tasks and members. */
+  private reopen(team: Team): Team {
+    const next: Team = { ...team, hops: 0 }
+    delete next.closed
+    delete next.paused
+    this.repo.team.teams.save(next)
+    this.repo.team.messages.save({ id: key('team-message', team.id, 'notice', this.now(), 'reopen'), teamId: team.id, from: 'system',
+      text: 'The person spoke again, so this group starts a new round.', at: this.now(), kind: 'notice' })
+    this.emit('team.resumed', { teamId: team.id })
+    return next
+  }
+  /**
+   * Hand the mentions to their members: a member whose turn is running in this group reads the line with its task; any other
+   * member goes to its inbox, and the runner wakes it when it is free. The person has no Session, so it is skipped.
+   */
+  private wake(teamId: string, mentions: readonly string[]): void {
+    const runner = this.runner()
+    const team = this.teamOf(teamId)
+    for (const memberId of mentions) {
+      if (this.superagent(memberId)?.role === 'human') continue
       const task = this.currentTask(teamId, memberId)
       if (task) runner.deliver(team, task)
-      else runner.talk?.(team, memberId, message)
+      else runner.wake?.(memberId)
     }
-    return message
+  }
+  /**
+   * Count one bot-to-bot mention against the group, and pause the group when the chain reaches `TEAM_HOP_LIMIT`. Speaking by
+   * the person resets the count, and the person's own mentions are never suppressed: a manual pause is meant to stop the bots,
+   * not the person, who can always name someone.
+   * @returns whether the mention wakes nobody, because the group is paused.
+   */
+  private hop(teamId: string, from: string, mentions: readonly string[]): boolean {
+    const team = this.teamOf(teamId)
+    // The person is what the hop chain is measured from, and can name anyone even while the group is paused.
+    if (this.superagent(from)?.role === 'human') return false
+    if (team.paused) return true
+    if (!mentions.some(memberId => this.superagent(memberId)?.role !== 'human')) return false
+    const hops = (team.hops ?? 0) + 1
+    if (hops < TEAM_HOP_LIMIT) { this.repo.team.teams.save({ ...team, hops }); return false }
+    const at = this.now()
+    const paused = { ...team, hops, paused: { at, reason: 'hops' as const } }
+    this.repo.team.teams.save(paused)
+    this.repo.team.messages.save({ id: key('team-message', teamId, 'notice', at, 'hops'), teamId, from: 'system',
+      text: `The bots have mentioned each other ${hops} times without you speaking, so this group is paused. Say something to continue.`,
+      at, kind: 'notice' })
+    this.emit('team.paused', { teamId, reason: 'hops' })
+    return true
+  }
+  /** Pause a group by hand: its messages are still recorded, but its mentions wake nobody until it is resumed. */
+  pause(teamId: string): Team {
+    const team = this.teamOf(teamId)
+    if (team.paused) return team
+    const paused = { ...team, paused: { at: this.now(), reason: 'manual' as const } }
+    this.repo.team.teams.save(paused)
+    this.emit('team.paused', { teamId, reason: 'manual' })
+    return paused
+  }
+  /** Resume a paused group, whichever way it paused, and clear its mention chain. @throws UserError when no such team exists. */
+  resume(teamId: string): Team {
+    const team = this.teamOf(teamId)
+    if (!team.paused) return { ...team, hops: 0 }
+    const resumed: Team = { ...team, hops: 0 }
+    delete resumed.paused
+    this.repo.team.teams.save(resumed)
+    this.emit('team.resumed', { teamId })
+    return resumed
+  }
+  /**
+   * The mentions waiting for a bot, oldest first, and the ones its last batch already carried. What the runner reads to build
+   * one batch, and what the panel shows as "queued".
+   */
+  inbox(botId: string, state: 'pending' | 'delivered' = 'pending'): InboxItem[] { return this.repo.team.inbox.list(botId, state) }
+  /**
+   * Take a bot's pending mentions as one batch: read them, group them by team, and mark them delivered. The runner then
+   * prompts the bot once with the batch, rather than once per message.
+   *
+   * @returns the batch, or undefined when nothing is waiting.
+   */
+  takeBatch(botId: string): InboxBatch | undefined { return this.batchOf(botId) }
+  /**
+   * Mark a batch's mentions delivered, and advance the bot's read cursor in each group to the newest message it carried.
+   * @throws UserError when the batch is empty.
+   */
+  deliverBatch(botId: string, batch: InboxBatch): void {
+    const at = this.now()
+    for (const group of batch.teams) {
+      for (const item of group.mentions) {
+        const item_ = this.repo.team.inbox.list(botId, 'pending').find(pending => pending.messageId === item.id)
+        if (item_) this.repo.team.inbox.save({ ...item_, state: 'delivered', batchId: batch.batchId })
+      }
+      const newest = group.context.at(-1)?.at ?? group.mentions.at(-1)?.at
+      if (newest) this.repo.team.cursors.save({ teamId: group.teamId, memberId: botId, readAt: newest })
+    }
+    this.emit('team.inbox.delivered', { botId, batchId: batch.batchId, messageIds: batch.teams.flatMap(group => group.mentions.map(item => item.id)) })
   }
   /** Whether a member has a running turn, and the task it runs. */
   private currentTask(teamId: string, memberId: string): TeamTask | undefined {
@@ -287,6 +526,28 @@ export class Teams extends EnginePart {
 
   // Helpers
 
+  /**
+   * Build the batch of mentions waiting for a bot: everything pending, oldest first, cut at `BATCH_MENTIONS`, grouped by the
+   * group it came from, with the talk each group had since the bot last read it so a mention arrives with its context.
+   * @returns the batch, or undefined when nothing is waiting.
+   */
+  private batchOf(botId: string): InboxBatch | undefined {
+    const pending = this.repo.team.inbox.list(botId, 'pending')
+    if (!pending.length) return undefined
+    const batchId = key('team-batch', botId, pending[0]!.at, String(pending.length))
+    const byTeam = new Map<string, InboxItem[]>()
+    for (const item of pending.slice(0, BATCH_MENTIONS)) byTeam.set(item.teamId, [...(byTeam.get(item.teamId) ?? []), item])
+    const teams = [...byTeam].map(([teamId, items]) => {
+      const team = this.repo.team.teams.get(teamId)
+      const readAt = this.repo.team.cursors.get(teamId, botId)?.readAt ?? ''
+      const unread = this.repo.team.messages.list(teamId).filter(message => message.at > readAt && !items.some(item => item.messageId === message.id))
+      const omitted = Math.max(0, unread.length - BATCH_CONTEXT)
+      const context = unread.slice(-BATCH_CONTEXT)
+      return { teamId, teamName: team?.name ?? teamId, ...omitted ? { omitted } : {}, context,
+        mentions: items.map(item => this.repo.team.messages.get(item.messageId)).filter((message): message is TeamMessage => message !== undefined) }
+    }).filter(group => group.mentions.length)
+    return teams.length ? { botId, batchId, teams } : undefined
+  }
   private runner(): SuperagentRunner { return this.options.superagent ?? NOOP_SUPERAGENT }
   private teamOf(teamId: string): Team { const team = this.repo.team.teams.get(teamId); if (!team) throw new UserError('unknownTeam'); return team }
   private taskOf(taskId: string): TeamTask { const task = this.repo.team.tasks.get(taskId); if (!task) throw new UserError('unknownTask'); return task }
@@ -330,4 +591,15 @@ export function inCycle(tasks: readonly TeamTask[]): Set<string> {
 export const taskReason = (reason: string): Reason => ({ code: 'teamTaskFailed', values: { reason } })
 /** A change to a superagent: a field left out is kept, and `null` clears an optional one. */
 export interface SuperagentChange { name?: string; capabilities?: string[] | null; persona?: string | null;
-  skills?: string[] | null; directory?: string | null; disabled?: { at: string; by: string } | null }
+  skills?: string[] | null; directory?: string | null; repository?: string | null; feishuCli?: string | null;
+  disabled?: { at: string; by: string } | null }
+/** What a `sendMessage` may carry besides its text and kind. */
+export interface SendOptions { mentions?: readonly string[]; replyTo?: string; taskId?: string; triggerId?: string }
+/** The most mentions one batch carries; the rest wait for the next batch, oldest first. */
+export const BATCH_MENTIONS = 40
+/** The most messages of a group's talk a batch brings as context around that group's mentions. */
+export const BATCH_CONTEXT = 15
+/** One group's part of a batch: what it said since the bot last read it, and the messages that mentioned the bot. */
+export interface InboxBatchGroup { teamId: string; teamName: string; omitted?: number; context: TeamMessage[]; mentions: TeamMessage[] }
+/** Everything waiting for one bot, taken together so one bot reads one batch whatever happened across its groups. */
+export interface InboxBatch { botId: string; batchId: string; teams: InboxBatchGroup[] }

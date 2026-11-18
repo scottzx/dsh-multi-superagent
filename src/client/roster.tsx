@@ -9,6 +9,7 @@ import { Button, Input, Modal } from './controls.tsx'
 import { isViewing, usePresence, type Presence } from './presence.ts'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { requestTeam } from './route.ts'
+import { teamName } from './text.ts'
 
 const REQUESTS = new Set(['approval', 'plan-review', 'question'])
 const AVATAR_COLORS = ['#3b6ea5', '#2f7d6d', '#8a5a2b', '#7a4e8a', '#3f6f4e', '#8a4a4a', '#3e5f8a', '#6e6a32']
@@ -21,11 +22,13 @@ export interface StatusSource {
 function Create({ onDone }: { onDone: () => void }) {
   const { t, call } = usePanel()
   const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState({ id: '', name: '', persona: '', capabilities: '' })
+  const [draft, setDraft] = useState({ id: '', name: '', persona: '', capabilities: '', repository: '', feishuCli: '' })
   const create = useAction(async () => {
     await call('POST superagents', { body: { id: draft.id.trim(), name: draft.name.trim(),
       ...draft.persona.trim() ? { persona: draft.persona.trim() } : {},
-      ...draft.capabilities.trim() ? { capabilities: draft.capabilities.split(',').map(item => item.trim()).filter(Boolean) } : {} } })
+      ...draft.capabilities.trim() ? { capabilities: draft.capabilities.split(',').map(item => item.trim()).filter(Boolean) } : {},
+      ...draft.repository.trim() ? { repository: draft.repository.trim() } : {},
+      ...draft.feishuCli.trim() ? { feishuCli: draft.feishuCli.trim() } : {} } })
   })
   return <>
     <button type="button" className="dt-roster-add" onClick={() => setOpen(true)}>{t('superagentCreate')}</button>
@@ -35,6 +38,8 @@ function Create({ onDone }: { onDone: () => void }) {
       <label className="dt-field">{t('superagentId')}<Input value={draft.id} onChange={event => setDraft({ ...draft, id: event.target.value })} /></label>
       <label className="dt-field">{t('superagentName')}<Input value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
       <label className="dt-field">{t('superagentCapabilities')}<Input value={draft.capabilities} onChange={event => setDraft({ ...draft, capabilities: event.target.value })} /></label>
+      <label className="dt-field">{t('superagentRepository')}<Input value={draft.repository} placeholder="owner/name" onChange={event => setDraft({ ...draft, repository: event.target.value })} /></label>
+      <label className="dt-field">{t('superagentFeishu')}<Input value={draft.feishuCli} placeholder={t('superagentFeishuHint')} onChange={event => setDraft({ ...draft, feishuCli: event.target.value })} /></label>
       <label className="dt-field">{t('superagentPersona')}<textarea className="dt-textarea" rows={4} value={draft.persona} onChange={event => setDraft({ ...draft, persona: event.target.value })} /></label>
     </Modal>
   </>
@@ -133,11 +138,12 @@ export function Roster({ wide, sessions, status, openTeam }: {
     <div className="dt-roster-head"><span>{t('rosterGroups')}</span></div>
     {groups.length ? <ul className="dt-roster-list">{groups.map(team => {
       const value = presence[`team:${team.id}`] ?? 'idle'
+      const name = teamName(t, team)
       return <li key={team.id}>
         <button type="button" className="dt-roster-row" onClick={() => { requestTeam(team.id); openTeam?.() }}>
-          <Avatar name={team.name} id={team.id} presence={value} label={label(value)} />
+          <Avatar name={name} id={team.id} presence={value} label={label(value)} />
           <span className="dt-roster-copy">
-            <span className="dt-roster-name">{team.name}</span>
+            <span className="dt-roster-name">{name}</span>
             <span className="dt-roster-role">{team.members.map(member => member.name).join(t('listSeparator'))}</span>
           </span>
         </button>

@@ -52,11 +52,14 @@ export const USER_ERRORS = {
   teamLeadMissing: ['refused', 'A group team needs a lead who is one of its members'],
   notAMember: ['refused', '{member} is not a member of this team'],
   teamClosed: ['refused', 'This team round is closed'],
+  teamTooLarge: ['refused', 'A group team holds at most {limit} bots besides you'],
+  tooManyMentions: ['refused', 'A message mentions at most {limit} members'],
+  mentionSelf: ['refused', 'Use the text to address yourself; a message cannot mention its own sender'],
+  unknownMessage: ['missing', 'Unknown team message {message}'],
   noProposedTasks: ['refused', 'This team has no proposed tasks to dispatch'],
   taskNotWorking: ['refused', 'This team task is not working'],
   outputsMissing: ['refused', 'A done task must report the deliverables it declared'],
   superagentDisabled: ['refused', 'This superagent is disabled; enable it before it can take a turn or a message'],
-  notDirect: ['refused', 'A message from a person goes to a direct conversation, not a group'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
 export type UserErrorCode = keyof typeof USER_ERRORS
 

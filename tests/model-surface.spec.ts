@@ -38,8 +38,10 @@ interface Skill { name: string; description: string; content: string }
  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
  * The orchestrator budget rose for the team of superagents: its lead tools (create, propose, dispatch, close, message, read)
  * add about 1.9k characters of tool schema to the main Session's surface.
+ * It rose again for the all-hands group: one line in the lead's prompt names the group the lead dispatches in, and two tool
+ * descriptions name it too. The surface was already about 80 characters over the old limit before that change.
  */
-const BUDGET: Record<Role, number> = { orchestrator: 63_000, worker: 40_500 }
+const BUDGET: Record<Role, number> = { orchestrator: 63_200, worker: 40_500 }
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'

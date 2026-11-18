@@ -7,7 +7,8 @@ import type { OverviewView } from './views/overview.ts'
 import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
-import type { TeamDetailView, TeamListView } from './views/teams.ts'
+import type { ProfileView, AgentsMdWrite } from './profiles.ts'
+import type { TeamDetailView, TeamListView, TeamMessagesView } from './views/teams.ts'
 import type { TicketListView } from './views/tickets.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
@@ -38,10 +39,16 @@ export interface Api {
   'GET teams': { response: TeamListView }
   'GET teams/:id': { response: TeamDetailView }
   'POST teams/:id/close': { body: { summary: string }; response: { closed: boolean } }
-  'POST teams/:id/message': { body: { text: string }; response: { message_id: string } }
+  'POST teams/:id/message': { body: { text: string; at?: string[]; reply_to?: string }; response: { message_id: string; woke: string[] } }
+  'GET teams/:id/messages': { query?: { after?: string; limit?: number }; response: TeamMessagesView }
+  'POST teams/:id/pause': { body: { paused: boolean }; response: { paused: boolean } }
+  'POST teams': { body: { name: string; member_ids: string[]; kind?: 'group' | 'direct'; lead_id?: string }; response: { team_id: string } }
   'GET superagents': { response: { superagents: TeamListView['teams'][number]['members'] } }
-  'POST superagents': { body: { id: string; name: string; capabilities?: string[]; persona?: string; directory?: string }; response: { id: string } }
-  'POST superagents/:id': { body: { name?: string; capabilities?: string[] | null; persona?: string | null; directory?: string | null; disabled?: boolean }; response: { id: string } }
+  'GET superagents/:id/profile': { response: ProfileView }
+  'PUT superagents/:id/agents-md': { body: AgentsMdWrite; response: ProfileView }
+  'GET superagents/:id/skills/:name': { response: { name: string; content: string } }
+  'POST superagents': { body: { id: string; name: string; capabilities?: string[]; persona?: string; directory?: string; repository?: string; feishuCli?: string }; response: { id: string } }
+  'POST superagents/:id': { body: { name?: string; capabilities?: string[] | null; persona?: string | null; directory?: string | null; repository?: string | null; feishuCli?: string | null; disabled?: boolean }; response: { id: string } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
   'GET policy/history': { response: HistoryView }
