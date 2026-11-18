@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SETUP · dsh-superagent 演示</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="index.html">dsh-superagent<span>MODELSCOPE STUDIO 演示</span></a>
+  <nav><div class="group">概览</div><a class="nav" href="index.html">首页</a><a class="nav active" href="setup.html">快速开始 SETUP</a><div class="group">设计文档</div><a class="nav" href="docs/000-philosophy.html">000-philosophy</a><a class="nav" href="docs/001-domain.html">001-domain</a><a class="nav" href="docs/002-authorization.html">002-authorization</a><a class="nav" href="docs/003-execution.html">003-execution</a><a class="nav" href="docs/004-prompts.html">004-prompts</a><a class="nav" href="docs/005-panel.html">005-panel</a><a class="nav" href="docs/006-deployment.html">006-deployment</a><a class="nav" href="docs/007-architecture.html">007-architecture</a><a class="nav" href="docs/008-cookbook.html">008-cookbook</a><a class="nav" href="docs/009-multi-superagent.html">009-multi-superagent</a></nav>
+  <footer>部署于 ModelScope 创空间 · Docker</footer>
+</aside>
+<main>
+<article class="content">
+<h1 id="setup">SETUP</h1>
+<p>Instructions for an agent that sets up dsh-superagent with its operator. If you are a person, ask your coding agent to read this file and follow it.</p>
+<h2 id="how-to-run-the-setup">How to run the setup</h2>
+<p>The setup follows <a href="docs/000-philosophy.html">docs/000-philosophy.md</a>: it takes as little of the operator's attention as possible.</p>
+<ul>
+<li><strong>Before the first question,</strong> read only this file and <code>docs/000-philosophy.md</code>, and run the probe below once. Read nothing else until every answer is collected.</li>
+<li><strong>Ask one question per message,</strong> about one thing. Wait for the answer before the next one. Skip a question the probe already answers.</li>
+<li><strong>Keep each message under 300 words,</strong> unless the operator asks for more. Give each question a recommended answer the operator can accept with one word, and one sentence on why it matters.</li>
+<li><strong>Do not execute while asking.</strong> Collect every answer, then send one message with the full plan, and execute only after the operator confirms it.</li>
+<li><strong>Never ask for a secret in the chat.</strong> Steps that need the operator's hands, such as creating an account, signing a CLI in or entering an app secret, go into one message with the exact commands to run in their own terminal.</li>
+<li><strong>Teach the philosophy through the questions,</strong> one sentence at a time, not as a lecture.</li>
+</ul>
+<h2 id="1-probe">1. Probe</h2>
+<p>Run from this checkout, once, and keep the result to yourself:</p>
+<pre><code class="language-sh">node -v; pnpm -v; git --version; tmux -V; python3 --version; gh --version | head -1; dsh --version
+gh api user --jq .login
+command -v lark-cli
+grep -l -E 'id: dsh-superagent\b' &quot;${DSH_HOME:-$HOME/.dsh}&quot;/profiles/*/cordis.patch.yml 2&gt;/dev/null
+</code></pre>
+<ul>
+<li><strong>Prerequisites:</strong> Node.js 22.19+ or 24+, pnpm, git 2.32+, tmux, Python 3.8+, GitHub CLI 2.48+, and DSH within the <code>engines.dsh</code> range of <code>package.json</code>. A missing one becomes an item of the plan, not a question. DSH also needs a model provider; if the operator has never run DSH with a model, configuring one is an operator step.</li>
+<li><strong>Operator login:</strong> the <code>gh api user</code> result is the operator's own GitHub login, used as the recommendation in question 5.</li>
+<li><strong>Existing profile:</strong> a profile with a <code>dsh-superagent</code> entry is an earlier setup: ask whether to continue it, keep its configuration, and read Upgrade in <code>docs/006-deployment.md</code>.</li>
+</ul>
+<h2 id="2-questions">2. Questions</h2>
+<p>Ask in this order, one per message, following the flow of work in <a href="docs/001-domain.html">docs/001-domain.md</a>: first where Triggers come from, then who may ask for work there, then what the Executor does with a Ticket. Recommendations are in brackets.</p>
+<p><strong>Sources: where requests come from.</strong></p>
+<ol>
+<li><strong>Sources.</strong> Should the agent take requests from GitHub only, or also from Feishu chats? [GitHub only, unless the team works in Feishu.]</li>
+<li><strong>Repository.</strong> Which github.com repository should the agent work on, as <code>owner/name</code>?</li>
+<li><strong>Agent account.</strong> Which GitHub user account will the agent act as? [A dedicated account, never the operator's own: everything the agent writes appears under this name.] It may not exist yet; creating it is an operator step.</li>
+<li>With Feishu: <strong>which chats,</strong> by name? The agent looks up their ids after the bot is configured.</li>
+</ol>
+<p><strong>Policy: who may ask for work.</strong></p>
+<ol start="5">
+<li><strong>On GitHub.</strong> Which GitHub logins may ask the agent for work? [Only <code>&lt;operator login&gt;</code>: the agent acts only for people on this list, and a short list keeps the team's noise low while the operator learns how the agent behaves.]</li>
+<li>With Feishu: <strong>who may ask in Feishu?</strong> [Everyone in the first chat, kept in sync with its members.]</li>
+</ol>
+<p><strong>Execution: what the agent does with a Ticket.</strong></p>
+<ol start="7">
+<li><strong>Checkout.</strong> Which local clone of the repository should each Ticket check out from? [A new clone under <code>~/src/&lt;name&gt;</code>.]</li>
+<li><strong>Commit identity.</strong> Who should the agent's commits name as author? [The agent account, so its work is visibly its own.] Another identity, such as the operator's, goes into the Delivery requirements prompt section.</li>
+<li><strong>Auto-merge.</strong> Should the agent enable auto-merge on its own pull requests once they are ready and approved? [No: people merge until the agent's pull requests have been right for a while.] The agent never enables it as the agent account, so with yes it needs the GitHub CLI of another account that may merge: ask the operator to sign one in among the operator steps, and name it in Delivery requirements. With no, remove the auto-merge paragraph from Delivery requirements.</li>
+</ol>
+<p>Do not ask about values with a good default; list them in the plan instead:</p>
+<ul>
+<li>profile <code>superagent</code>, a copy of DSH's Web profile kept apart from the profile the operator works in, so it restarts without closing their Sessions; port <code>3082</code>; state directory <code>&lt;home&gt;/.dsh/state/superagent</code> as an absolute path;</li>
+<li>an hourly check from the operator's own profile, which repairs dsh-superagent when it is not running;</li>
+<li>branch prefix <code>agent/</code>;</li>
+<li>accept mode <code>observe</code>, which records proactive work without doing it, and the default rules and prompt sections;</li>
+<li>with Feishu: the bot reads only mentions, and direct messages are on.</li>
+</ul>
+<h2 id="3-plan">3. Plan</h2>
+<p>Send one message, under 300 words: what will be installed, the accounts and CLIs, the settings to save, the operator steps, and the defaults. Ask for one confirmation.</p>
+<h2 id="4-execute">4. Execute</h2>
+<ol>
+<li><strong>Operator steps first.</strong> Read the Accounts section of <code>docs/006-deployment.md</code>, write the CLI wrappers yourself, then send one message with what only the operator can do: create the agent account and, with auto-merge, sign a CLI in as the account that enables it, accept the repository invitation as the agent account, run <code>auth login</code> for each wrapper, and for Feishu create and publish the bot app and run the <code>config init</code> command with its secret. Wait until the operator says it is done, then check each login with <code>&lt;wrapper&gt; api user --jq .login</code>.</li>
+<li><strong>Install and start.</strong> Follow the Install, Machine configuration, and Start and stop sections of <code>docs/006-deployment.md</code>. Skip the <code>git clone</code> of this repository: you are in its checkout. Clone the repository of question 2 if question 7 asked for a new clone. With an existing profile, skip the <code>dsh superagent --from-default-profile</code> command, which would replace the profile and delete its <code>cordis.patch.yml</code>, and edit that file instead of replacing it.</li>
+<li><strong>Settings.</strong> Save them through the Management API of <code>docs/006-deployment.md</code>, in this order: the <code>github</code> Source, the <code>feishu</code> Source if used, the <code>policy</code> block with the allowed lists (for Feishu, look up the chat ids with the bot's CLI first), and the <code>executor</code> block with a prepare command from the answer to question 7. Then save the prompts with the commit identity of question 8 and the auto-merge answer of question 9 in Delivery requirements. A save that returns <code>restarting: true</code> restarts dsh-superagent: wait until <code>scripts/dsh-superagent status</code> no longer exits 1 before the next request, and read the revisions again from <code>GET settings</code>.</li>
+<li><strong>Failures.</strong> A refused save names the setup problem in its response body. Find it in the Troubleshooting table of <code>docs/006-deployment.md</code>, fix it, and continue. Ask the operator only for what you cannot fix yourself.</li>
+</ol>
+<h2 id="5-verify-and-hand-over">5. Verify and hand over</h2>
+<p><code>scripts/dsh-superagent status</code> exits 0 with no setup problem. If you run in the operator's own DSH profile, create the hourly check of the Hourly check section of <code>docs/006-deployment.md</code> with your schedule tool; otherwise give the operator its prompt to schedule there. Then send one message, under 300 words:</p>
+<ul>
+<li>The panel URL, and that the <strong>Superagent</strong> entry in the sidebar is where to look.</li>
+<li>How to try it: from an account on the allowed list, comment <code>@&lt;agent login&gt; &lt;request&gt;</code> on an issue in the repository. A Ticket appears on the overview within about a minute.</li>
+<li>Three rules for the operator, from the Responsibility section of <code>docs/000-philosophy.md</code>: start narrow, tune for less noise, own what the agent says.</li>
+<li>Where to read more: the numbered documents in <code>docs/</code>, in order.</li>
+</ul>
+</article>
+</main>
+</body>
+</html>

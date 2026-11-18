@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>004 Prompts · dsh-superagent 演示</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="../index.html">dsh-superagent<span>MODELSCOPE STUDIO 演示</span></a>
+  <nav><div class="group">概览</div><a class="nav" href="../index.html">首页</a><a class="nav" href="../setup.html">快速开始 SETUP</a><div class="group">设计文档</div><a class="nav" href="000-philosophy.html">000-philosophy</a><a class="nav" href="001-domain.html">001-domain</a><a class="nav" href="002-authorization.html">002-authorization</a><a class="nav" href="003-execution.html">003-execution</a><a class="nav active" href="004-prompts.html">004-prompts</a><a class="nav" href="005-panel.html">005-panel</a><a class="nav" href="006-deployment.html">006-deployment</a><a class="nav" href="007-architecture.html">007-architecture</a><a class="nav" href="008-cookbook.html">008-cookbook</a><a class="nav" href="009-multi-superagent.html">009-multi-superagent</a></nav>
+  <footer>部署于 ModelScope 创空间 · Docker</footer>
+</aside>
+<main>
+<article class="content">
+<h1 id="004-prompts">004 Prompts</h1>
+<p>This document explains what the agents read, what a team can edit, and when changes take effect. It builds on <a href="000-philosophy.html">000 Philosophy</a> through <a href="003-execution.html">003 Execution</a>. Prompt text is written in English.</p>
+<h2 id="what-a-team-writes">What a team writes</h2>
+<p>A team can edit three team sections, add skills, and override every built-in system-prompt part. Most defaults live under <code>prompts/</code> and <code>skills/</code>. Tool descriptions, notices and cards remain in code and cannot be edited through prompt settings.</p>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Holds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Communication</td>
+<td>When to message people, how messages read, the line that begins every GitHub message (<code>This is by an automated agent, not a human</code> by default), how to handle reviews, and which ordinary accounts are review bots</td>
+</tr>
+<tr>
+<td>Ticket scope</td>
+<td>When a Ticket goes on and when it stops with a draft</td>
+</tr>
+<tr>
+<td>Delivery requirements</td>
+<td>Evidence in pull requests, the auto-merge condition with its line threshold, and the commit author; without one, the Executor commits as the agent account's no-reply address</td>
+</tr>
+<tr>
+<td>Team skills</td>
+<td>Knowledge the agents load when they need it, such as an <code>identities</code> skill that says which Feishu user is which GitHub account</td>
+</tr>
+</tbody>
+</table>
+<p>The built-in text covers the roles, tool usage, host mechanics, authorization rules, and the GitHub and Feishu skills. It refers to the team sections by their headings instead of repeating them.</p>
+<h3 id="built-in-parts-and-templates">Built-in parts and templates</h3>
+<p>Overrides use these keys:</p>
+<table>
+<thead>
+<tr>
+<th>Parts</th>
+<th>Keys</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Shared instructions and roles</td>
+<td><code>runtime/shared</code>, <code>runtime/orchestrator</code>, <code>runtime/worker</code></td>
+</tr>
+<tr>
+<td>Working instructions</td>
+<td><code>runtime/subscriptions</code>, <code>runtime/replies</code>, <code>runtime/dispatch</code>, <code>runtime/work</code>, <code>runtime/admission</code></td>
+</tr>
+<tr>
+<td>Handoff instructions</td>
+<td><code>runtime/handoff/orchestrator</code>, <code>runtime/handoff/worker</code></td>
+</tr>
+<tr>
+<td>Source skills</td>
+<td><code>skill/feishu</code>, <code>skill/github</code></td>
+</tr>
+<tr>
+<td>Generated sections</td>
+<td><code>runtime/environment</code>, <code>runtime/policy</code>, <code>runtime/policy/none</code></td>
+</tr>
+</tbody>
+</table>
+<p>The generated sections are editable templates. They must retain these placeholders:</p>
+<ul>
+<li><code>runtime/environment</code>: <code>{variables}</code>, filled with execution environment lines.</li>
+<li><code>runtime/policy</code>: <code>{version}</code>, <code>{mode}</code> and <code>{rules}</code>, with one line per enabled rule.</li>
+<li><code>runtime/policy/none</code>: <code>{version}</code> and <code>{mode}</code>, used when no rule is enabled.</li>
+</ul>
+<p>Editing a part changes the instructions the model receives. It does not change the gate, Mandates, tool checks or account wrappers, which remain enforced by code.</p>
+<p>On an explicit human request, the main Session can also save overrides with <code>orchestrator_prompts_save</code>. If a save omits an override's <code>base</code>, it keeps the saved base. A removed part already present in the saved configuration is dropped on save; any other unknown part is refused.</p>
+<p>An override records which built-in text it was based on. Upgrades preserve the team's text. If the default changes, the panel marks the part <strong>Default updated</strong> and shows the difference beside the team's text. The team can keep its text, use the new default or edit it. Parts without overrides automatically follow new defaults.</p>
+<p>The main Session can read affected part names in <code>orchestrator_read prompts</code>, under <code>default_changed</code>.</p>
+<h2 id="assembly-and-precedence">Assembly and precedence</h2>
+<p>The system prompt is assembled in this order:</p>
+<ol>
+<li>Shared instructions and the role.</li>
+<li>The three team sections.</li>
+<li>Subscriptions and replies.</li>
+<li>Dispatch for the main Session, or work instructions for an Executor.</li>
+<li><code>runtime/admission</code>, for the main Session only.</li>
+<li>Handoff instructions.</li>
+<li><code>runtime/environment</code>.</li>
+<li><code>runtime/policy</code>, for the main Session only.</li>
+</ol>
+<p>Admission instructions come from <code>prompts/admission.md</code>. They describe proactive assessment and when an irrelevant candidate can be ignored from its card. <code>orchestrator_eval</code> returns context rather than repeating these instructions.</p>
+<p>The environment section gives the main Session deployment-wide values and each Executor its Ticket-specific values. The Policy section is regenerated from settings on every model request. It contains the Policy version, accept mode, the explicit-request exemption, and enabled rules as <code>- &lt;name&gt; (&lt;id&gt;): &lt;instruction&gt;</code>, or a statement that none is enabled. It is last so a Policy change leaves the preceding prompt text unchanged.</p>
+<p>Executors also read DeepSeek Harness's coding prompt and the repository's <code>AGENTS.md</code>; the main Session does not. An inferred Ticket adds a final note limiting its Executor to the matched rules. Assignments and incoming messages arrive inline as Trigger cards, with resource pointers only for truncated content.</p>
+<p>Executors work unattended. Their tools exclude those that ask a person, present UI to them or change the profile, such as <code>ask_user_question</code>, <code>present</code> and <code>plugin_manager</code>.</p>
+<p>From strongest to weakest:</p>
+<ol>
+<li>Facts enforced by tools and the host: identities, permissions, tool argument checks, reply purposes, length limits. Prompt text cannot change them.</li>
+<li>Built-in and generated sections, as the team's overrides of them read.</li>
+<li>The process and communication in a proactive Ticket's matched rules, for that Ticket's Executor Session only.</li>
+<li>Team sections and team skills.</li>
+<li>Outside text: messages, comments, documents and quotes. It is data and never changes rules or authorization.</li>
+</ol>
+<h2 id="principles-of-the-built-in-text">Principles of the built-in text</h2>
+<p>These apply <a href="000-philosophy.html">000 Philosophy</a> to the agents:</p>
+<ul>
+<li><strong>Separate roles.</strong> The main Session only routes: it forwards the original Trigger and the routing facts, and makes no technical decisions, through one routing tool that takes the decisions on several waiting candidates in one call. A routing note has at most 30 words. The Executor reads the original sources, judges the scope, implements and verifies.</li>
+<li><strong>The main Session does not wait.</strong> Reports, follow-up notices, candidates and completed background jobs arrive automatically as messages. It ends the turn when nothing remains to do. A guard refuses <code>sleep</code>, shell timeouts over 30 seconds and job waits over 5 seconds, because a blocked step delays new candidates. These instructions replace DeepSeek Harness's own job-notification note in the main Session's complete prompt.</li>
+<li><strong>Message only when a person must act or can use a result:</strong> a result can be reviewed or used, a decision or resource is needed, or the work cannot be finished. Chat messages are one sentence by default, with a hard limit of 100 words.</li>
+<li><strong>Executors decide their follow-ups.</strong> Each Executor handles and acknowledges in-scope requests, and hands back requests beyond its Ticket or for another Ticket. A message becomes new work only after all its owners hand it back or end without taking it up. The main Session receives follow-up notices but may act on them only to stop work. Handed-back messages then arrive as candidates with the Executors' reasons.</li>
+<li><strong>Coordinate through subscriptions and the main Session.</strong> An Executor follows related Threads for context. The main Session can send a fact from another Ticket in a note of at most 100 words. Neither the Subscription nor the note grants authority.</li>
+<li><strong>Attach only on an explicit reference.</strong> A message must point to a Ticket's pull request, Issue, source message or acknowledgement, or to a recent change with exactly one matching Ticket. Topic similarity alone is not enough. Attachment subscribes the Ticket to the entire Thread; an Executor finding it unrelated uses <code>orchestrator_thread_unrelated</code> and does not answer there.</li>
+<li><strong>Confirm concretely, once.</strong> Before substantial work, the Executor confirms each new request and names the object and the expected result, as a reply under the original message.</li>
+<li><strong>Ask through <code>human_action</code>.</strong> The Executor puts one concrete question in its Report, and the main Session forwards it unchanged. If a person's message prompted the question, it names that message and the host asks there. Otherwise it asks in the Ticket's original conversation. Already authorized work can continue meanwhile.</li>
+<li><strong>Honest delivery.</strong> Opening a pull request is not readiness; a draft is marked unfinished; a UI change without a real before screenshot is not ready.</li>
+<li><strong>A person's pause holds</strong> across follow-ups, new Executor Sessions and restarts until a person lifts it. Automatic feedback never resumes paused work.</li>
+<li><strong>Examples only show format.</strong> An example sentence is not a fact the agent may claim.</li>
+<li><strong>Handle reviews by outcome.</strong> A fixed and verified comment is resolved silently; a declined one gets one sentence of reason. An automated reviewer's thread is resolved once it has an answer, and each automated reviewer gets at most three rounds per pull request.</li>
+<li><strong>Yield to duplicate work.</strong> When a person's branch or pull request already contains the Ticket's change, the Executor closes its own pull request with one sentence pointing to theirs.</li>
+</ul>
+<h2 id="versions">Versions</h2>
+<ul>
+<li>Each save creates an immutable version containing the full configuration, revision number, predecessor, timestamp and origin (panel or tool). Restoring a version or defaults creates another version.</li>
+<li>Saves name their base revision. A conflicting save is refused without discarding the draft.</li>
+<li>Sessions read the latest version on every model request, including later steps in the same turn. Saving does not restart, cancel or wake a Session. The host records the revisions each Session used; an Executor can read any revision it worked under.</li>
+<li>The deployment sets a total size limit, including overrides. Validation refuses unknown keys, reserved built-in skill names, unknown override parts and missing template placeholders. It never silently truncates text. An override identical to the default is removed so the part follows future defaults.</li>
+</ul>
+</article>
+</main>
+</body>
+</html>

@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>009 Multiple superagents · dsh-superagent 演示</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="../index.html">dsh-superagent<span>MODELSCOPE STUDIO 演示</span></a>
+  <nav><div class="group">概览</div><a class="nav" href="../index.html">首页</a><a class="nav" href="../setup.html">快速开始 SETUP</a><div class="group">设计文档</div><a class="nav" href="000-philosophy.html">000-philosophy</a><a class="nav" href="001-domain.html">001-domain</a><a class="nav" href="002-authorization.html">002-authorization</a><a class="nav" href="003-execution.html">003-execution</a><a class="nav" href="004-prompts.html">004-prompts</a><a class="nav" href="005-panel.html">005-panel</a><a class="nav" href="006-deployment.html">006-deployment</a><a class="nav" href="007-architecture.html">007-architecture</a><a class="nav" href="008-cookbook.html">008-cookbook</a><a class="nav active" href="009-multi-superagent.html">009-multi-superagent</a></nav>
+  <footer>部署于 ModelScope 创空间 · Docker</footer>
+</aside>
+<main>
+<article class="content">
+<h1 id="009-multiple-superagents">009 Multiple superagents</h1>
+<p>This document describes how dsh-superagent moves from <strong>one orchestrator superagent that routes work to
+non-deciding workers</strong> to <strong>a team of superagents</strong>: one lead that admits and coordinates, several
+professional superagents that can talk to each other in group and direct chat, and workers that carry
+the concrete implementation. It builds on <a href="001-domain.html">001 Domain model</a>, <a href="002-authorization.html">002 Authorization</a>
+and <a href="003-execution.html">003 Execution</a>, and is the design behind the <code>multi-superagent</code> fork.</p>
+<p>The fork keeps every existing behaviour. Teams are <strong>additive</strong>: a deployment with no team configured runs
+exactly the single-superagent system described by the documents before this one.</p>
+<h2 id="why">Why</h2>
+<p>A single orchestrator owns all admission and all reporting. Its Session is the one place decisions are
+made and the one bottleneck every candidate and every worker report passes through. Splitting the team
+into a lead and professional superagents:</p>
+<ul>
+<li>lets each superagent own a <strong>domain and a conversation</strong> (a module, a source, a kind of work) instead
+  of one Session juggling everything;</li>
+<li>lets specialists <strong>talk to each other</strong> before work starts, so a division is negotiated and recorded
+  rather than inferred by one Session;</li>
+<li>keeps the lead as the <strong>single admission authority</strong>, so the gate, Mandates and Policy stay in one place;</li>
+<li>keeps workers as the <strong>single execution authority</strong>, so implementation stays bounded by a Ticket.</li>
+</ul>
+<p>The model follows the group-chat division pattern: a lead closes a discussion, names who does what and in
+what order, each member carries its part, reports back, and the lead closes the round. The difference from
+a plain chat is that <strong>every message and task is a domain record</strong>, so the same durability, idempotence and
+audit that Triggers and Tickets have apply to team talk.</p>
+<h2 id="roles">Roles</h2>
+<table>
+<thead>
+<tr>
+<th>Role</th>
+<th>What it is</th>
+<th>Where it runs</th>
+<th>Decides</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Lead</td>
+<td>The admission authority: admits candidates, proposes and dispatches a division, relays results, closes rounds</td>
+<td>The main Session (<code>orchestrator</code>), extended with team tools</td>
+<td>Accept, attach, stop, ignore; who does what</td>
+</tr>
+<tr>
+<td>Specialist</td>
+<td>A professional superagent with its own Session, domain and conversation</td>
+<td>A <code>superagent-&lt;id&gt;</code> Session under a new preset</td>
+<td>Its own task, its messages, and what it delegates to a worker</td>
+</tr>
+<tr>
+<td>Worker</td>
+<td>The concrete executor for a Ticket</td>
+<td>A <code>worker-&lt;ticket&gt;</code> Session, unchanged</td>
+<td>Implementation within its Ticket's Mandate</td>
+</tr>
+</tbody>
+</table>
+<p>The lead <strong>is</strong> the main Session. Specialists are new Sessions. Workers are unchanged.</p>
+<h2 id="concepts">Concepts</h2>
+<p>The domain keeps the existing concepts and adds four. A team is a <strong>conversation between superagents</strong>;
+it is not a Source, and its messages are not Triggers.</p>
+<h3 id="superagent">Superagent</h3>
+<p>A first-class agent identity in the domain: <code>{ id, name, role: 'lead' | 'specialist', capabilities?, directory?, createdAt }</code>.</p>
+<ul>
+<li>A superagent is the unit of a team's membership and of the Session that runs it.</li>
+<li><code>role: 'lead'</code> names the admission authority. At most one lead exists, and it is the main Session.</li>
+<li><code>role: 'specialist'</code> names a professional superagent. Capabilities are prompt text the lead uses to
+  divide work; the core does not interpret them.</li>
+<li><code>directory</code> optionally binds the superagent to its own project directory, so a specialist can be pointed at
+  its own checkout or module (one directory per superagent). When it is absent or blank, the runner starts the
+  superagent's Session in the machine's <strong>state directory</strong>, as before. The lead sets it through
+  <code>lead_team_create_superagent</code>; the panel shows it on the team's detail page.</li>
+<li><code>persona</code> is prompt text injected into that superagent's Session, after the shared superagent prompt, so a
+  product manager starts knowing it is a product manager. <code>capabilities</code> are named in the same section. The core
+  still does not interpret either. <code>skills</code> names skills bound to that superagent; they are named in its prompt,
+  and the Session registers the deployment's skills as before.</li>
+<li><code>disabled</code> pauses a superagent: it keeps its identity, but starts no turn and receives no message.</li>
+<li>One writer: the Engine, through the Teams part.</li>
+</ul>
+<h3 id="team">Team</h3>
+<p>A conversation between superagents: <code>{ id, name, kind: 'group' | 'direct', memberIds, leadId, createdAt, closed? }</code>.</p>
+<ul>
+<li><code>kind: 'group'</code>: several superagents talk in one place. A message reaches every member's Session.</li>
+<li><code>kind: 'direct'</code>: a private conversation between two superagents (lead and one specialist, or two
+  specialists). A message reaches only the two members.</li>
+<li>The lead of a group is the member who proposes the division and closes the round. A direct team has no
+  lead; either member can propose, and the recipient decides.</li>
+<li>One writer: the Engine, through the Teams part.</li>
+</ul>
+<h3 id="the-all-hands-group">The all-hands group</h3>
+<p>One group stands in every deployment: the <strong>all-hands group</strong> (<code>id: 'all-hands'</code>). Every bot belongs to it,
+so the lead dispatches to anyone without building a group first.</p>
+<ul>
+<li>It appears with the first bot that can lead it, and holds every bot registered so far; a bot registered
+  later joins it. Registering a specialist is therefore all it takes to make it dispatchable.</li>
+<li>The person is a member too, because the person speaks there.</li>
+<li>Its lead is the deployment's own lead: the main Session's identity, which the plugin registers at startup
+  as a bot of the team, or the first lead-role bot when the main Session holds none. The main Session is
+  that lead: a mention of it arrives in the main Session, not in a second one.</li>
+<li>The group is exempt from <code>TEAM_BOT_LIMIT</code>, which bounds the groups people build by hand.</li>
+<li>A closed group is not reopened here: only the person reopens a group, by speaking in it. A lead that
+  closed the all-hands group stops dispatching in it until the person speaks.</li>
+</ul>
+<h3 id="teammessage">TeamMessage</h3>
+<p>One message on a team: <code>{ id, teamId, from, text, at, kind, taskId?, triggerId? }</code>, where <code>kind</code> is
+<code>discussion</code>, <code>task</code>, <code>report</code>, <code>decision</code> or <code>notice</code>.</p>
+<ul>
+<li><code>task</code>: the message that carries a proposed or dispatched task to its assignee.</li>
+<li><code>report</code>: a superagent's report on a task it finished, which other members read.</li>
+<li><code>decision</code>: the lead's closing summary, the "定：" line of a round.</li>
+<li>A message is the unit of a superagent turn's input. A specialist reads the messages of its team and
+  answers with its own report.</li>
+</ul>
+<h3 id="teamtask">TeamTask</h3>
+<p>A piece of work assigned to one superagent in a team:
+<code>{ id, teamId, assigneeId, text, state, after, outputs, report?, reason?, createdAt, turn? }</code>.</p>
+<table>
+<thead>
+<tr>
+<th><code>state</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>proposed</code></td>
+<td>The lead proposed it; not dispatched yet</td>
+</tr>
+<tr>
+<td><code>waiting</code></td>
+<td>It waits for the members named in <code>after</code> to finish</td>
+</tr>
+<tr>
+<td><code>working</code></td>
+<td>Its assignee's superagent turn is running</td>
+</tr>
+<tr>
+<td><code>done</code></td>
+<td>Its assignee reported success</td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td>It failed, with <code>reason</code></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>after</code>: the member IDs whose tasks this one waits on. It orders work and records dependencies; it never
+  routes.</li>
+<li><code>outputs</code>: the deliverable file paths a task declares, checked before the task is treated as done.</li>
+<li><code>turn</code>: the superagent's current turn, shaped like an Assignment (<code>state</code>, <code>createdAt</code>, <code>startedAt</code>,
+  <code>endedAt</code>, <code>report</code>). It is what the <code>SuperagentRunner</code> port starts, delivers to and stops.</li>
+<li>A task is proposed once; dispatching it starts its turn. A member runs <strong>one task at a time</strong>; further
+  tasks queue behind it.</li>
+</ul>
+<p>The dispatch state machine is the one a group division uses:</p>
+<pre><code class="language-mermaid">stateDiagram-v2
+  [*] --&gt; proposed: lead proposes
+  proposed --&gt; waiting: it has `after`
+  proposed --&gt; working: dispatch starts it
+  waiting --&gt; working: its `after` tasks are done
+  waiting --&gt; failed: an `after` task failed
+  working --&gt; done: its assignee reports
+  working --&gt; failed: error, stop or no report
+  done --&gt; [*]
+  failed --&gt; [*]
+</code></pre>
+<p>A cycle in <code>after</code> fails at dispatch, with a notice, rather than waiting forever.</p>
+<h3 id="team-mandate">Team mandate</h3>
+<p>A Ticket created by a specialist's delegation carries a mandate whose basis is <code>{ via: 'team' }</code>, naming
+the team, the task and the lead who authorized it. It is revalidated by whether the team is still open and
+the task belongs to it; it does not depend on the admission table, because the lead — not a Source sender —
+granted it. This is the one new mandate basis; every other basis is unchanged.</p>
+<h2 id="how-a-round-runs">How a round runs</h2>
+<pre><code class="language-mermaid">flowchart TB
+  C[Candidate / request] --&gt; L[Lead]
+  L --&gt;|propose tasks| T[Team tasks]
+  T --&gt;|dispatch| S1[Specialist A]
+  T --&gt;|dispatch| S2[Specialist B]
+  S1 --&gt;|task reports| T
+  S2 --&gt;|task reports| T
+  S1 --&gt;|delegate| W[Worker ticket]
+  S2 --&gt;|delegate| W
+  W --&gt;|ready / blocked| S1
+  S1 --&gt;|close: 定| T
+  T --&gt;|result| L
+  L --&gt;|reply| S[Source channel]
+</code></pre>
+<ol>
+<li><strong>Admit.</strong> The lead receives a candidate or an explicit request exactly as today and decides accept,
+   attach, stop or ignore. An accepted request may become a <strong>team</strong> instead of a single Ticket: the lead
+   proposes who does what.</li>
+<li><strong>Propose.</strong> <code>lead_propose</code> records the tasks, each with an assignee, its text, the members it waits on
+   and the deliverables it declares. They are <code>proposed</code>, not yet working.</li>
+<li><strong>Dispatch.</strong> <code>lead_dispatch</code> moves tasks to <code>working</code> as members free up, starting each assignee's
+   superagent Session. <code>waiting</code> tasks start once their <code>after</code> tasks are <code>done</code>; a dependency cycle fails
+   the cycle at once.</li>
+<li><strong>Work.</strong> A specialist reads its task and the team's messages, does the work, and reports with
+   <code>superagent_team_report</code>: <code>done</code> with its outputs, or <code>failed</code> with a reason. It may send messages with
+   <code>superagent_team_message</code> (group or direct) and delegate concrete implementation to a worker with
+   <code>superagent_delegate</code>, which creates a Ticket under a team mandate.</li>
+<li><strong>Close.</strong> Dispatch returns as soon as the turns are started. The lead acknowledges the person in that same
+   turn and ends it; it does not wait for the specialists. When a task is done or failed, a <code>team_report</code> is
+   steered into the lead's Session, the same way a worker report is. The lead relays only once every task of the
+   round is done or failed, then closes. <code>lead_team_wait</code> reads reports already in; it does not block.
+   <code>lead_team_message</code> and <code>lead_team_close</code> write as the team's <code>leadId</code>, not as the main Session id, because
+   that id is not a team member. A message to a specialist with no working task is delivered as talk, which
+   starts no task. The lead is the main Session, so talk does not start a second Session for it.</li>
+<li><strong>Deliver.</strong> The lead relays the result to the source conversation, exactly as a worker's result is
+   relayed today.</li>
+</ol>
+<p>A specialist does not admit new work: it can only decide its own task, answer its messages, and delegate
+within its task. New admission stays with the lead.</p>
+<h2 id="where-it-lives-in-the-code">Where it lives in the code</h2>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Module</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Domain types</td>
+<td><code>src/core/model.ts</code></td>
+<td><code>Superagent</code>, <code>Team</code>, <code>TeamMessage</code>, <code>TeamTask</code>, <code>SuperagentTurn</code>, the <code>team</code> mandate basis, and <code>superagentWorkspace</code> (a superagent's directory or the fallback)</td>
+</tr>
+<tr>
+<td>Port</td>
+<td><code>src/core/ports.ts</code></td>
+<td><code>SuperagentRunner</code>: start, deliver and stop a superagent turn; the team repositories</td>
+</tr>
+<tr>
+<td>Engine part</td>
+<td><code>src/core/team.ts</code></td>
+<td><code>Teams</code>: superagent and team records, message routing, the dispatch state machine, the all-hands group, closing</td>
+</tr>
+<tr>
+<td>Engine</td>
+<td><code>src/core/engine.ts</code></td>
+<td>The Teams part, the lead and specialist role interfaces, delegation to a Ticket</td>
+</tr>
+<tr>
+<td>Runner</td>
+<td><code>src/executor/dsh.ts</code></td>
+<td><code>DshExecutor</code> implements <code>SuperagentRunner</code>: one superagent Session and its turns, launched in the superagent's bound directory or the state directory</td>
+</tr>
+<tr>
+<td>Sessions</td>
+<td><code>src/app/sessions.ts</code></td>
+<td>The <code>superagent</code> role, its preset, its prompt and tools</td>
+</tr>
+<tr>
+<td>Runtime</td>
+<td><code>src/app/runtime.ts</code></td>
+<td>Registers the main Session's lead identity and the all-hands group at startup</td>
+</tr>
+<tr>
+<td>Lead tools</td>
+<td><code>src/app/tools/main.ts</code> (and <code>src/app/tools/superagent.ts</code>)</td>
+<td><code>lead_team_create_superagent</code> (including its <code>directory</code>, <code>persona</code> and <code>skills</code>), <code>lead_team_list_superagents</code>, <code>lead_team_update_superagent</code>, <code>lead_team_create</code>, <code>lead_team_propose</code>, <code>lead_team_dispatch</code>, <code>lead_team_message</code>, <code>lead_team_close</code>, <code>lead_team_read</code>, <code>lead_team_wait</code></td>
+</tr>
+<tr>
+<td>Specialist tools</td>
+<td><code>src/app/tools/superagent.ts</code></td>
+<td><code>superagent_team_report</code>, <code>superagent_team_message</code>, <code>superagent_delegate</code></td>
+</tr>
+<tr>
+<td>Prompts</td>
+<td><code>prompts/</code></td>
+<td><code>lead.md</code>, <code>superagent.md</code>, and the team-communication section</td>
+</tr>
+<tr>
+<td>Store</td>
+<td><code>src/app/store.ts</code>, <code>src/app/migration.ts</code></td>
+<td>The <code>team</code>, <code>superagent</code>, <code>team_message</code>, <code>team_task</code>, <code>team_inbox</code> and <code>team_cursor</code> tables, schema 13</td>
+</tr>
+<tr>
+<td>Effects</td>
+<td><code>src/app/effects.ts</code></td>
+<td><code>superagent-launch</code> and <code>superagent-delivery</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="dependency-rules-kept">Dependency rules kept</h3>
+<ul>
+<li><strong>One writer per state.</strong> Superagents, teams, messages and tasks are written by <code>Teams</code>; the
+  <code>SuperagentRunner</code> only reports facts back (a turn started, inputs delivered, a turn ended, a failure),
+  exactly as <code>DshExecutor</code> does for tickets.</li>
+<li><strong>Explicit, narrow dependencies.</strong> <code>Teams</code> depends on the repositories, the Policy, the runner port and
+  <code>Tickets</code> (for delegation). It imports nothing from <code>src/app</code>.</li>
+<li><strong>Team talk is not a Source.</strong> A team's messages never become Triggers, and a team never enters Eval.
+  The lead is the only path from a team to a Ticket.</li>
+<li><strong>The lead stays the admission authority.</strong> Specialists have no <code>orchestrator_route</code>, and no tool of
+  theirs creates a Ticket except through delegation under a team mandate.</li>
+</ul>
+<h2 id="persistence-and-migration">Persistence and migration</h2>
+<p>Teams are stored as JSON rows in six tables (<code>superagent</code>, <code>team</code>, <code>team_message</code>, <code>team_task</code>, <code>team_inbox</code>, <code>team_cursor</code>), opened
+with <code>CREATE TABLE IF NOT EXISTS</code> on every start, and the schema version moves from 11 to 13. The schema 12 and 13
+migrations are additive and empty: older databases have no team rows, so nothing is converted. A deployment
+that never created a team runs the existing code path untouched.</p>
+<h2 id="talking-and-the-inbox">Talking, and the inbox</h2>
+<p>Talking is what makes a team a team rather than a queue: a superagent answers a mention, and mentions other superagents in
+turn. Two decisions keep that from becoming a runaway broadcast.</p>
+<p><strong>A mention wakes, and only a mention.</strong> A message carries a structured <code>mentions</code> list, filled from the <code>at</code> argument of
+<code>lead_team_message</code> / <code>superagent_team_message</code>. Text is never searched for <code>@</code>: writing <code>@writer</code> in a sentence wakes nobody,
+because guessing who a line is for from prose is exactly the ambiguity that produces both silence and noise. A message that
+mentions nobody is recorded for the record and read by whoever reads the group next; it starts no turn.</p>
+<p><strong>Mentions arrive in one batch.</strong> Every mention lands in the mentioned superagent's inbox (<code>botId</code>, <code>messageId</code>, <code>teamId</code>,
+<code>at</code>, <code>state</code>). A wake-up is one effect per superagent, keyed by its id, so ten groups mentioning the same bot at once produce
+one wake-up, not ten. The batch is delivered when the superagent is free to act:</p>
+<ul>
+<li>a superagent in the middle of a task reads its inbox with that task; a mention never steers a running turn;</li>
+<li>an idle one waits out a short debounce first, so a burst of mentions merges into one batch;</li>
+<li>a session that goes idle is woken again for anything that arrived while it was busy.</li>
+</ul>
+<p>The batch carries, per group, the talk since that superagent's read cursor (<code>team_cursor</code>) around the mentions, so a mention
+arrives with its context and no group is read twice. One batch holds at most 40 mentions and 15 messages of context per group;
+what does not fit waits for the next batch, oldest first.</p>
+<p><strong>The chain has a limit.</strong> Each bot-to-bot mention counts as one hop on the group. At 30 hops the group pauses itself: its
+messages are still recorded, but its mentions wake nobody, and a notice says so. The person speaking resets the count and
+resumes the group; a manual pause stops the bots but never the person, whose mentions always wake their target.</p>
+<p><strong>The person is a member.</strong> <code>me</code> is a fixed superagent identity with <code>role: 'human'</code>; it runs no Session, it is added to every
+team, and it speaks through the panel. It is never a group's lead: the lead is the admission authority and that stays a bot.</p>
+<h2 id="where-the-chat-lives">Where the chat lives</h2>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Module</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Inbox and batch</td>
+<td><code>src/core/team.ts</code></td>
+<td><code>sendMessage</code> records mentions into inboxes, <code>takeBatch</code> assembles them, <code>deliverBatch</code> advances the cursors, <code>hop</code> runs the chain limit, <code>pause</code> and <code>resume</code></td>
+</tr>
+<tr>
+<td>Wake-up</td>
+<td><code>src/executor/dsh.ts</code></td>
+<td>The <code>superagent-inbox</code> effect: one per superagent, debounced, held while the superagent is busy, re-armed when it goes idle. A mention of the lead is queued into the main Session, which already has the lead's tools</td>
+</tr>
+<tr>
+<td>Storage</td>
+<td><code>src/app/store.ts</code></td>
+<td><code>team_inbox</code> and <code>team_cursor</code>, schema 13</td>
+</tr>
+<tr>
+<td>Panel routes</td>
+<td><code>src/app/http.ts</code></td>
+<td>Speaking as the person in any conversation, pulling messages after a point, pausing and resuming</td>
+</tr>
+<tr>
+<td>Chat</td>
+<td><code>src/client/chat.tsx</code></td>
+<td>Bubbles and cards, the mention picker, each superagent's status, and the composer</td>
+</tr>
+<tr>
+<td>Profiles</td>
+<td><code>src/app/profiles.ts</code></td>
+<td>Each superagent's own directory, its <code>AGENTS.md</code>, and the skills it can read</td>
+</tr>
+</tbody>
+</table>
+<h2 id="a-superagents-own-brief">A superagent's own brief</h2>
+<p>A superagent's <code>AGENTS.md</code> is what it is told before every request, and DSH reads it from the Session's working directory. So
+each superagent runs in its own directory: its bound project directory when the lead bound one, and
+<code>&lt;stateDir&gt;/superagents/&lt;id&gt;/</code> otherwise. A shared directory would give every superagent the same brief.</p>
+<p><code>profiles.ts</code> reads and writes that file, refusing a save over a version it did not read, and lists the skills a superagent can
+read: the ones bound to it, the deployment's own, and any under its directory's <code>.agents/skills</code>.</p>
+<h2 id="skeleton-status">Skeleton status</h2>
+<p>The <code>multi-superagent</code> fork delivers the design above as a <strong>runnable skeleton</strong>:</p>
+<ul>
+<li>the four domain concepts, the dispatch state machine, dependency ordering and cycle detection, closing,
+  the team-mandate basis, and a superagent's bound project directory (optional, falling back to the state
+  directory), with unit tests over in-memory repositories;</li>
+<li>the standing all-hands group: every bot belongs to it, so the lead dispatches to any of them without
+  building a group first;</li>
+<li>the <code>SuperagentRunner</code> port and its <code>DshExecutor</code> implementation, with superagent Sessions;</li>
+<li>the lead and specialist tools, including <code>lead_team_wait</code>, and the <code>superagent</code> prompt role, which names the superagent and injects its persona;</li>
+<li>the team tables, the inbox and cursors of schema 13;</li>
+<li>the Web panel's Team tab: the list of team conversations, one team's tasks and messages, and closing a
+  round from the panel.</li>
+</ul>
+<p>Deferred to a later change, and not claimed by the skeleton:</p>
+<ul>
+<li>team-aware Source admission (a team still receives work only through the lead);</li>
+<li>automatic division (the lead still proposes explicitly);</li>
+<li>direct superagent-to-superagent ticket hand-off beyond delegation under a team mandate.</li>
+</ul>
+<h2 id="risks">Risks</h2>
+<ul>
+<li><strong>Two admission paths.</strong> Delegation creates a Ticket without a Source Trigger. The team mandate is the
+  safeguard; a closed team cannot authorize new work, and a specialist cannot delegate outside its task.</li>
+<li><strong>Superagent turns are long.</strong> A specialist turn can run far longer than a worker's. The runner bounds it
+  and reports a failure rather than hanging, and a turn is stopped when its task ends.</li>
+<li><strong>Group noise.</strong> The philosophy of <a href="000-philosophy.html">000</a> still governs: team talk is internal unless a
+  person must act or can use a result. The lead relays, specialists do not.</li>
+</ul>
+</article>
+</main>
+</body>
+</html>

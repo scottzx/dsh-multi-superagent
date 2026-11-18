@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>006 Deployment · dsh-superagent 演示</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="../index.html">dsh-superagent<span>MODELSCOPE STUDIO 演示</span></a>
+  <nav><div class="group">概览</div><a class="nav" href="../index.html">首页</a><a class="nav" href="../setup.html">快速开始 SETUP</a><div class="group">设计文档</div><a class="nav" href="000-philosophy.html">000-philosophy</a><a class="nav" href="001-domain.html">001-domain</a><a class="nav" href="002-authorization.html">002-authorization</a><a class="nav" href="003-execution.html">003-execution</a><a class="nav" href="004-prompts.html">004-prompts</a><a class="nav" href="005-panel.html">005-panel</a><a class="nav active" href="006-deployment.html">006-deployment</a><a class="nav" href="007-architecture.html">007-architecture</a><a class="nav" href="008-cookbook.html">008-cookbook</a><a class="nav" href="009-multi-superagent.html">009-multi-superagent</a></nav>
+  <footer>部署于 ModelScope 创空间 · Docker</footer>
+</aside>
+<main>
+<article class="content">
+<h1 id="006-deployment">006 Deployment</h1>
+<p>Use this guide to install, configure and operate dsh-superagent. It covers accounts, startup checks, upgrades and troubleshooting, building on <a href="001-domain.html">001 Domain model</a> through <a href="005-panel.html">005 Panel</a>.</p>
+<h2 id="what-runs">What runs</h2>
+<ul>
+<li><strong>A dedicated DeepSeek Harness profile</strong>, called <code>superagent</code> in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on <code>127.0.0.1</code>. Keep it separate from the profile you work in: the plugin changes process-wide <code>PATH</code> and git settings, and its process needs independent restarts and upgrades.</li>
+<li><strong>An agent GitHub account.</strong> The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.</li>
+<li><strong>Optional:</strong> a Feishu bot for chat requests.</li>
+</ul>
+<p>Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.</p>
+<h3 id="permissions-and-isolation">Permissions and isolation</h3>
+<p>The bundle defines <code>dsh-superagent-worker</code> for Executors and <code>dsh-superagent-router</code> for the main Session. They appear in the DeepSeek Harness preset list but are intended only for dsh-superagent. Do not select them for personal Sessions or disable their configuration rows. The application needs them to create and resume its Sessions.</p>
+<p>Opening a blank managed Session in the Web UI can select the profile's default preset. dsh-superagent restores its role-specific preset before the first turn.</p>
+<p>Both presets run with <code>danger-full-access</code> as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux</li>
+<li>GitHub CLI (<code>gh</code>) 2.48 or later. Source CLI fields must point to <code>gh</code> or <code>lark-cli</code> wrappers; the host relies on their subcommands and output formats.</li>
+<li>A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install <code>git-lfs</code> if that repository uses Git LFS.</li>
+<li>A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.</li>
+<li>For Feishu: <code>lark-cli</code> (tested with 1.0.90) and a Feishu or Lark app with a bot</li>
+</ul>
+<h2 id="accounts">Accounts</h2>
+<h3 id="agent-github-account">Agent GitHub account</h3>
+<ol>
+<li>Create a GitHub user account for the agent and give it write access to the repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications.</li>
+<li>Give it a GitHub CLI that uses only its own credentials:</li>
+</ol>
+<p><code>sh
+   mkdir -p ~/.local/bin
+   cat &gt; ~/.local/bin/gh-agent &lt;&lt;'EOF'
+   #!/bin/sh
+   GH_CONFIG_DIR="$HOME/.config/gh-agent" exec gh "$@"
+   EOF
+   chmod +x ~/.local/bin/gh-agent
+   gh-agent auth login
+   gh-agent api user --jq .login</code></p>
+<p>Sign in as the agent account; the last command prints its login. dsh-superagent reads the login the same way.</p>
+<h3 id="feishu-bot-optional">Feishu bot (optional)</h3>
+<ol>
+<li>Create a self-built app with the bot capability. Grant it the permissions to receive message events, read and send chat messages, and read chat members, then publish the app version.</li>
+<li>Give the bot its own <code>lark-cli</code> configuration, restricted to the bot identity, and a wrapper:</li>
+</ol>
+<p><code>sh
+   LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent" lark-cli config init --app-id &lt;cli_…&gt; --app-secret-stdin
+   LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent" lark-cli config strict-mode bot --global
+   cat &gt; ~/.local/bin/lark-bot &lt;&lt;'EOF'
+   #!/bin/sh
+   export LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-dsh-superagent"
+   exec lark-cli "$@"
+   EOF
+   chmod +x ~/.local/bin/lark-bot</code></p>
+<p>The first command reads the app secret from standard input. Use a separate configuration directory: <code>lark-cli</code> allows one profile per app id, and your personal configuration may already contain a user login for that app.</p>
+<p>The host refuses a CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot <code>open_id</code> from the bot configuration.</p>
+<p>Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run <code>lark-cli config remove</code>, which would affect the shared secret.</p>
+<h2 id="install">Install</h2>
+<p>Run this block once, on a machine that has no <code>superagent</code> profile yet:</p>
+<pre><code class="language-sh">npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+git clone &lt;this repository&gt; dsh-superagent &amp;&amp; cd dsh-superagent
+pnpm install &amp;&amp; pnpm build
+dsh superagent --from-default-profile web --dump-config &gt; /dev/null
+dsh plugin --profile superagent add &quot;link:$PWD&quot;
+</code></pre>
+<p>The pinned version above is public; other versions must satisfy <code>engines.dsh</code> in <code>package.json</code>.</p>
+<p>The fourth command creates <code>~/.dsh/profiles/superagent</code> from the DeepSeek Harness Web template. The fifth installs this bundle. Set <code>DSH_HOME</code> to relocate the default <code>~/.dsh</code> directory.</p>
+<p>Run the profile-creation command only for a new installation. If the profile already exists, that command replaces it and deletes its <code>cordis.patch.yml</code>, including machine configuration. Do not use it for upgrades.</p>
+<h2 id="machine-configuration">Machine configuration</h2>
+<p>Copy <a href="../examples/profile.cordis.patch.yml">examples/profile.cordis.patch.yml</a> to <code>~/.dsh/profiles/superagent/cordis.patch.yml</code>, replacing that file, and replace every <code>&lt;placeholder&gt;</code>. For Feishu, also enable the <code>dsh-superagent-feishu</code> entry there. The <code>webserver</code> entry sets the panel's port.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Required</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>stateDir</code></td>
+<td>yes</td>
+<td>Absolute path: the database, the lock, the command shims in <code>worker-bin</code>, the agent's git configuration and, by default, the Ticket directories in <code>work</code>. Back it up before upgrades</td>
+</tr>
+<tr>
+<td><code>promptMaxChars</code>, <code>admissionContextMaxPages</code>, <code>admissionContextTimeoutMs</code></td>
+<td>no</td>
+<td>The largest saved prompt configuration, and how many Thread pages one assessment reads within what time</td>
+</tr>
+</tbody>
+</table>
+<p>After the first start, edit machine limits in <strong>Settings → Deployment</strong> or the DeepSeek Harness Plugin Manager. Changes apply without restart. <code>stateDir</code> cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.</p>
+<h2 id="start-and-stop">Start and stop</h2>
+<pre><code class="language-sh">scripts/dsh-superagent start
+scripts/dsh-superagent status
+</code></pre>
+<p><code>start</code> runs <code>dsh --profile superagent</code> in tmux session <code>dsh-superagent</code>, or <code>dsh-&lt;profile&gt;</code> for another profile. It waits up to one minute for the runtime to become ready or report a setup requirement. On a first run it prints the missing setup information. It refuses duplicate instances, including ones started outside this script.</p>
+<p><code>stop</code> and <code>restart</code> request graceful shutdown and wait up to five minutes for Executors. They never force-kill the process or touch other tmux sessions.</p>
+<p><code>status</code> prints process ids, health and setup problems. For a different profile or port, use <code>--profile</code> and <code>--url</code>, or set <code>DSH_SUPERAGENT_PROFILE</code> and <code>DSH_SUPERAGENT_URL</code>.</p>
+<p><code>status</code>, <code>start</code> and <code>restart</code> exit with one of four codes:</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>The service runs normally</td>
+</tr>
+<tr>
+<td>1</td>
+<td>It does not run, runs twice, does not answer, or its runtime reports an error; a restart may fix it</td>
+</tr>
+<tr>
+<td>2</td>
+<td>It runs, but a part other than the runtime, such as a Source or a Policy sync (<code>sync:&lt;source id&gt;</code>), reports an error; a restart does not fix it</td>
+</tr>
+<tr>
+<td>3</td>
+<td>It runs and waits for setup; a restart does not fix it</td>
+</tr>
+</tbody>
+</table>
+<p>A Source that is still starting counts as normal operation. So does a Feishu bot that setup could not check.</p>
+<p><code>status</code> returns failed parts and their details under <code>errors</code>, and setup requirements under <code>setup</code>. <code>start</code> and <code>restart</code> print those problems as lines; they exit 1 if the service never comes up. Only an intentional <code>stop</code> pauses automatic recovery.</p>
+<p>Each profile stores logs and control files under <code>.artifacts/</code>:</p>
+<ul>
+<li>Startup logs: <code>dsh-superagent-&lt;profile&gt;-&lt;date&gt;-&lt;time&gt;-&lt;pid&gt;.log</code>, where the pid belongs to the script. The newest 20 are kept.</li>
+<li>Control files: <code>control/profiles/&lt;profile&gt;/</code>, containing the stop marker, lock and process id.</li>
+</ul>
+<p>Open the URL printed in the log, then choose <strong>Superagent</strong> in the sidebar.</p>
+<h3 id="hourly-check">Hourly check</h3>
+<p>Create the hourly check in the DeepSeek Harness profile you normally use, not in <code>superagent</code>. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path filled in:</p>
+<pre><code class="language-text">Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in &lt;checkout&gt;. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest .artifacts/dsh-superagent-superagent-*.log and the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
+</code></pre>
+<p><code>--respect-stop</code> preserves an intentional stop. Only <code>stop</code> writes the marker; <code>start</code> clears it. <code>restart</code> writes no marker, so the check can recover a restart whose shutdown timed out.</p>
+<h2 id="settings">Settings</h2>
+<p>Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose <strong>Check again</strong>.</p>
+<ol>
+<li><strong>Sources.</strong> Set the GitHub repository (<code>owner/name</code>) and agent CLI, for example <code>/home/me/.local/bin/gh-agent</code>. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.</li>
+<li><strong>Policy.</strong> The two example rules can be edited or removed. Under <strong>On each Source</strong>, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on <strong>Sync now</strong>.</li>
+<li><strong>Execution.</strong> The directory root and a prepare command. To give each Ticket a checkout of the repository:</li>
+</ol>
+<p><code>sh
+   git -C /home/me/src/widgets fetch --no-tags "https://github.com/$DSH_SUPERAGENT_GITHUB_REPOSITORY.git" "${DSH_SUPERAGENT_GITHUB_PR_HEAD:-HEAD}:refs/dsh-superagent/$DSH_SUPERAGENT_TICKET" &amp;&amp;
+   git -C /home/me/src/widgets worktree add -b "agent/$DSH_SUPERAGENT_NAME" "$DSH_SUPERAGENT_DIR" "refs/dsh-superagent/$DSH_SUPERAGENT_TICKET"</code></p>
+<p>List personal CLIs, such as one signed in to your own account, as blocked commands.
+4. <strong>Prompts.</strong> Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.</p>
+<h3 id="management-api">Management API</h3>
+<p>The panel uses a local HTTP API that agents can also call. <code>SETUP.md</code> uses it to save settings, and the service script reads <code>GET state</code>.</p>
+<p>Send requests to <code>http://127.0.0.1:&lt;port&gt;/orchestrator/api/</code> with <code>x-orchestrator-request: 1</code>. The host must be <code>127.0.0.1:&lt;port&gt;</code> or <code>localhost:&lt;port&gt;</code>. Missing headers or an <code>Origin</code> from another site receive 403.</p>
+<p>API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.</p>
+<p>Agents may rely on these routes and fields. The other routes in <code>src/app/api.ts</code> serve the panel and change with it.</p>
+<table>
+<thead>
+<tr>
+<th>Request</th>
+<th>Answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET state</code></td>
+<td>What every page reads: <code>setup</code>, with <code>problem</code> and <code>feishuProblem</code>, each <code>null</code> or a setup problem with <code>place</code>, <code>code</code>, <code>values</code> and <code>detail</code>, and <code>accounts</code> once setup resolved them; <code>health</code>, an entry per part, below, with <code>state</code> (<code>starting</code>, <code>ready</code>, <code>paused</code> or <code>error</code>), <code>detail</code> and <code>at</code>; <code>load</code>, the Executor Sessions <code>running</code>, the Tickets <code>queued</code> and <code>maxWorkers</code>; <code>paused</code>; and <code>masterId</code></td>
+</tr>
+<tr>
+<td><code>GET settings</code></td>
+<td><code>blocks</code>: <code>policy</code>, <code>eval</code> and <code>executor</code>, each with its <code>value</code> and its <code>revision</code>; <code>sources</code>: the Source instances, each with <code>id</code>, <code>kind</code>, <code>installed</code>, its block's <code>value</code>, <code>{"enabled": …, "config": {…}}</code>, and <code>revision</code>, its kind's form, and its setup <code>problem</code> when it has one; <code>policyVersion</code>; and <code>environment</code>, the execution environment's <code>root</code> and <code>variables</code></td>
+</tr>
+<tr>
+<td><code>GET sources</code></td>
+<td>Each Source's status: <code>state</code> (<code>missing</code>, <code>off</code>, <code>error</code>, <code>setup</code>, <code>starting</code>, <code>paused</code> or <code>ready</code>), the <code>health</code> of its parts, its setup <code>problem</code>, the last day's <code>stats</code>, the Triggers it <code>filtered</code> in that day, and the messages it <code>dropped</code> in that day, newest drop first, each with its <code>channel</code>, <code>preview</code>, <code>ticket</code> (<code>id</code> and <code>title</code>) when it was for one, its <code>thread</code> when the store has it, and <code>dropped.at</code> and <code>dropped.reason</code>, <code>channelGone</code> or <code>channelIgnored</code></td>
+</tr>
+<tr>
+<td><code>PUT settings/&lt;block&gt;</code> with <code>{"value": …, "revision": n}</code></td>
+<td>Saves one block: <code>saved</code>, the block's new <code>revision</code>, <code>policy_changed</code> and <code>restarting</code>. <code>value</code> is the whole block, as <code>GET settings</code> holds it; a missing key takes its default</td>
+</tr>
+<tr>
+<td><code>POST executor/pause</code> with <code>{"paused": true}</code> or <code>false</code></td>
+<td>Pauses or resumes processing: <code>paused</code></td>
+</tr>
+<tr>
+<td><code>POST setup/check</code></td>
+<td>Runs setup again by restarting dsh-superagent: <code>restarting: true</code>. Refused when setup has nothing to fix</td>
+</tr>
+<tr>
+<td><code>POST policy-sync/&lt;source id&gt;</code></td>
+<td>Syncs that Source's allowed list now: <code>policy</code>, the Source's part as saved</td>
+</tr>
+<tr>
+<td><code>GET prompts</code>, <code>PUT prompts</code> with <code>{"config", "baseRevision"}</code></td>
+<td>Reads the prompt configuration: <code>current</code>, with its <code>revision</code> and <code>config</code>, <code>defaults</code>, <code>sections</code>, the team sections in the order Sessions read them, <code>skillName</code>, the pattern of a team skill's name, <code>builtin</code>, the names a team skill cannot take, and <code>skillPrefix</code>, which Sessions load a skill's name under. Or saves it: the new <code>revision</code></td>
+</tr>
+<tr>
+<td><code>POST tickets/&lt;id&gt;/retry</code>, <code>POST tickets/&lt;id&gt;/stop</code></td>
+<td>Retries or stops a Ticket, as the panel does</td>
+</tr>
+</tbody>
+</table>
+<p>Health entries are grouped by responsibility:</p>
+<table>
+<thead>
+<tr>
+<th>Entry</th>
+<th>Reports</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>runtime</code></td>
+<td>The application itself</td>
+</tr>
+<tr>
+<td><code>models</code></td>
+<td>Sessions waiting on a model-budget retry</td>
+</tr>
+<tr>
+<td><code>evals</code></td>
+<td>Unavailable Evals from the last hour with no later judgement or dismissal</td>
+</tr>
+<tr>
+<td><code>assessment</code>, <code>launch</code>, <code>delivery</code>, <code>relay</code>, <code>notice</code>, <code>reply</code></td>
+<td>Stored work described in <a href="003-execution.html">003 Execution</a>; delivery counts waiting work, while reply covers Channel messages</td>
+</tr>
+<tr>
+<td><code>worker</code></td>
+<td>Executor Session event handling; appears after its first failure</td>
+</tr>
+<tr>
+<td><code>github</code>, <code>feishu</code>, <code>history</code></td>
+<td>Source polling, events and history recovery</td>
+</tr>
+<tr>
+<td><code>sync:&lt;source id&gt;</code></td>
+<td>Allowed-list synchronization</td>
+</tr>
+</tbody>
+</table>
+<p>A refusal has a status and <code>error</code>, its English text:</p>
+<ul>
+<li>400: an invalid value (<code>issues</code>, each with its <code>path</code>), a failed account check (<code>setup</code>), a fixed refusal (<code>code</code> and <code>values</code>), or a body that is not JSON or is too large.</li>
+<li>404: something that does not exist.</li>
+<li>409: a stale revision.</li>
+<li>500: anything else.</li>
+</ul>
+<p>The blocks:</p>
+<ul>
+<li><code>source:github</code>, <code>source:feishu</code>: <code>{"enabled": true, "config": {…}}</code>. GitHub's config has <code>repository</code> and <code>cli</code>, and the switches <code>observeIssues</code>, <code>observePulls</code>, <code>observeComments</code> and <code>observeCi</code>, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has <code>cli</code>, <code>chats</code> as <code>[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]</code> (or <code>"all"</code>), <code>directMessages</code>, and <code>otherChats</code> as <code>"none"</code> or <code>"mentions"</code>.</li>
+<li><code>policy</code>: <code>{"rules": […], "sources": {"github": {"allowed": [{"id": "&lt;login&gt;"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}</code>. <code>bots</code> lists the bots whose messages may become inferred candidates. An <code>admission</code> row is keyed by chat id, <code>other</code> or <code>direct</code> for Feishu, and by <code>issues</code>, <code>pulls</code>, <code>comments</code> or <code>ci</code> for GitHub; an unset cell takes its default (see <a href="002-authorization.html">002 Authorization</a>).</li>
+<li><code>eval</code>: <code>mode</code>, <code>timeoutSeconds</code> and <code>model</code>.</li>
+<li><code>executor</code>: <code>model</code>, <code>maxWorkers</code>, <code>directory</code>, <code>prepare</code> and <code>blockedCommands</code>. The processing pause is a setting of its own, <code>paused</code>, which <code>POST executor/pause</code> sets.</li>
+</ul>
+<p>Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in <code>setup</code>. A successful account change, or any save while setup is pending, returns <code>restarting: true</code>. The API is temporarily unavailable while the application restarts.</p>
+<pre><code class="language-sh">api=http://127.0.0.1:3082/orchestrator/api
+rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == &quot;github&quot;) | .revision')
+curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
+  -d &quot;{\&quot;value\&quot;: {\&quot;enabled\&quot;: true, \&quot;config\&quot;: {\&quot;repository\&quot;: \&quot;acme/widgets\&quot;, \&quot;cli\&quot;: \&quot;$HOME/.local/bin/gh-agent\&quot;}}, \&quot;revision\&quot;: $rev}&quot;
+</code></pre>
+<h2 id="setup-checks">Setup checks</h2>
+<p>Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.</p>
+<p>Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.</p>
+<p>The process environment that setup writes:</p>
+<ul>
+<li><strong>Command shims</strong> in <code>&lt;stateDir&gt;/worker-bin</code>, first on <code>PATH</code>: <code>gh</code> runs the agent's CLI; <code>lark-cli</code> runs the bot's CLI; blocked commands fail. A shim removes its own directory from <code>PATH</code> before it runs its target.</li>
+<li><strong>git configuration</strong> in <code>&lt;stateDir&gt;/worker-gitconfig</code>: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and <code>GH_TOKEN</code> and <code>GITHUB_TOKEN</code> are removed.</li>
+</ul>
+<p>A file in <code>worker-bin</code> or <code>worker-gitconfig</code> that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.</p>
+<h2 id="try-it">Try it</h2>
+<p>From an allowed GitHub account, open an Issue or post a comment containing <code>@&lt;agent login&gt; &lt;request&gt;</code>. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat.</p>
+<h2 id="upgrade">Upgrade</h2>
+<ol>
+<li>Wait until no Executor is in the middle of a turn.</li>
+<li>Back up <code>&lt;stateDir&gt;/orchestrator.sqlite</code>.</li>
+<li>Run <code>git pull &amp;&amp; pnpm install &amp;&amp; pnpm build</code>.</li>
+<li>Run <code>scripts/dsh-superagent restart</code> and inspect its status.</li>
+</ol>
+<p>A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked <strong>Default updated</strong> after upgrading.</p>
+<p>A database migrated by a newer version cannot be opened by an older one. Rollback therefore requires the pre-upgrade backup. After upgrading DeepSeek Harness itself, restart the running instance so the panel loads matching artifacts.</p>
+<h3 id="agent-presets">Agent presets</h3>
+<p>The worker and router presets move shell commands to the background after 5 seconds. A Session cannot load without its preset. Keep the <code>dsh-superagent-worker</code> and <code>dsh-superagent-router</code> rows in <code>cordis.patch.yml</code> while their Sessions are in use; otherwise resume fails with <code>agent-preset/not-found</code>.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p>Setup problems appear on the overview with a link to the fix, in the panel's language; the log and the API show the English text below.</p>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Cause and fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>The agent GitHub CLI is not set.</code></td>
+<td>Set the agent's CLI on the GitHub card</td>
+</tr>
+<tr>
+<td><code>The agent GitHub CLI was not found.</code></td>
+<td>Set the wrapper's absolute path, or a command name on <code>PATH</code></td>
+</tr>
+<tr>
+<td><code>The agent GitHub CLI cannot read its account</code></td>
+<td>Sign the wrapper in with <code>auth login</code></td>
+</tr>
+<tr>
+<td><code>@… cannot read …</code> or <code>@… cannot push to …</code></td>
+<td>Give the agent account write access to the repository</td>
+</tr>
+<tr>
+<td><code>The GitHub Source names no repository.</code></td>
+<td>Set the repository, <code>owner/name</code>, on the GitHub card</td>
+</tr>
+<tr>
+<td>A Ticket fails with <code>The prepare command failed: …</code></td>
+<td>The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket</td>
+</tr>
+<tr>
+<td><code>git does not read the github.com credential configuration dsh-superagent writes</code></td>
+<td>Install git 2.32 or later</td>
+</tr>
+<tr>
+<td>A Ticket fails with <code>The git configuration of the repository in … sets …</code></td>
+<td>Remove the named credential or <code>http.*.extraheader</code> settings from the clone's <code>.git/config</code></td>
+</tr>
+<tr>
+<td><code>… was not written by dsh-superagent</code></td>
+<td>Move the named file out of <code>&lt;stateDir&gt;/worker-bin</code> or <code>&lt;stateDir&gt;/worker-gitconfig</code>, or choose another <code>stateDir</code></td>
+</tr>
+<tr>
+<td><code>The bot lark-cli allows user identities</code></td>
+<td>Point the Feishu Source at a bot-only configuration, as in Feishu bot above</td>
+</tr>
+<tr>
+<td><code>The bot lark-cli does not work.</code> or <code>The bot identity of app … is …</code></td>
+<td>Check the configuration's app id and secret</td>
+</tr>
+<tr>
+<td><code>The Feishu bot is not a member of the chat.</code></td>
+<td>Add the bot to the chat in the chat's settings; the next attempt succeeds</td>
+</tr>
+<tr>
+<td><code>status</code> exits 2</td>
+<td>A part reports an error, which a restart does not fix: <code>errors</code> names each part, as listed under Management API, with its detail; each part clears its own entry once it works again</td>
+</tr>
+<tr>
+<td><code>status</code> exits 3</td>
+<td>Setup waits: <code>setup</code> says what is missing, and the overview links to the setting that fixes it</td>
+</tr>
+<tr>
+<td><code>status</code> exits 1</td>
+<td>The service does not run, runs twice, does not answer, or its runtime reports an error; the output and the newest log say which</td>
+</tr>
+<tr>
+<td><code>… timed out after 90 s</code>, <code>… was stopped by …</code>, <code>… exited with code …</code> or <code>… could not run: …</code></td>
+<td>A CLI failed without printing why; run the named program by hand as the operator's user to see its own message</td>
+</tr>
+<tr>
+<td>The panel says dsh-superagent is not answering</td>
+<td>It is restarting, or did not start because of its configuration; the DeepSeek Harness log names the cause</td>
+</tr>
+<tr>
+<td><code>dsh-superagent configuration has keys it does not use</code> (log)</td>
+<td>Remove the named keys; the message says where each value lives now</td>
+</tr>
+<tr>
+<td>The log says the plugin is incompatible with the running dsh</td>
+<td>Install a DeepSeek Harness version within the <code>engines.dsh</code> range</td>
+</tr>
+<tr>
+<td>The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade</td>
+<td>Restart the running instance</td>
+</tr>
+<tr>
+<td>Nothing happens after a mention</td>
+<td>Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub, a mention added by editing an Issue's body is not received; mention the agent in a comment</td>
+</tr>
+</tbody>
+</table>
+</article>
+</main>
+</body>
+</html>

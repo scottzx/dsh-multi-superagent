@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>008 Cookbook · dsh-superagent 演示</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="../index.html">dsh-superagent<span>MODELSCOPE STUDIO 演示</span></a>
+  <nav><div class="group">概览</div><a class="nav" href="../index.html">首页</a><a class="nav" href="../setup.html">快速开始 SETUP</a><div class="group">设计文档</div><a class="nav" href="000-philosophy.html">000-philosophy</a><a class="nav" href="001-domain.html">001-domain</a><a class="nav" href="002-authorization.html">002-authorization</a><a class="nav" href="003-execution.html">003-execution</a><a class="nav" href="004-prompts.html">004-prompts</a><a class="nav" href="005-panel.html">005-panel</a><a class="nav" href="006-deployment.html">006-deployment</a><a class="nav" href="007-architecture.html">007-architecture</a><a class="nav active" href="008-cookbook.html">008-cookbook</a><a class="nav" href="009-multi-superagent.html">009-multi-superagent</a></nav>
+  <footer>部署于 ModelScope 创空间 · Docker</footer>
+</aside>
+<main>
+<article class="content">
+<h1 id="008-cookbook">008 Cookbook</h1>
+<p>This cookbook shows how to extend dsh-superagent. It uses the terms in <a href="001-domain.html">001 Domain model</a> and <a href="002-authorization.html">002 Authorization</a>, and the components in <a href="007-architecture.html">007 Architecture</a>.</p>
+<h2 id="add-a-source">Add a Source</h2>
+<p>This recipe implements a Source kind called <code>webhook</code>. It reads an imaginary message queue through an invented CLI, <code>hookq</code>, and converts messages to Triggers. All other interfaces are part of dsh-superagent.</p>
+<p>The implementation has four responsibilities: translate events, define receiving and authorization rules, provide replies and context, and maintain a polling loop. The numbered steps build those pieces in order.</p>
+<p>The example assumes this CLI contract:</p>
+<ul>
+<li><code>hookq pull --after &lt;n&gt; --json</code> prints the messages after position <code>n</code>, oldest first: <code>{"me": "&lt;the agent's id on the queue&gt;", "items": […], "next": &lt;position&gt;}</code>. An item has <code>id</code>, <code>conversation</code>, <code>thread</code> (the id of the message that started its thread, absent on that message), <code>sender</code> with <code>id</code> and <code>bot</code>, <code>mentions_me</code>, <code>text</code>, <code>at</code> and <code>url</code>.</li>
+<li><code>hookq reply --conversation &lt;id&gt; --to &lt;message id&gt; --key &lt;key&gt; --text &lt;text&gt;</code> replies under a message, once per key. For a conversation that was deleted it fails with <code>{"error": {"code": 410, "message": "…"}}</code> on standard error.</li>
+<li><code>hookq thread --conversation &lt;id&gt; --root &lt;message id&gt; --json</code>, with <code>--after &lt;cursor&gt;</code> for a later page, prints a page of a thread, oldest first: <code>{"items": […], "next": "&lt;cursor&gt;"}</code>, without <code>next</code> on the last page.</li>
+</ul>
+<p>Put the kind and its plugin entry in <code>src/sources/webhook.ts</code>, following <code>src/sources/github.ts</code>. If the Source grows, split translation, Channel and polling code into separate modules as the Feishu Source does.</p>
+<h3 id="1-map-the-events-onto-the-domain">1. Map the events onto the domain</h3>
+<p>Choose stable mappings before writing code. Trigger ids, Thread ids and Channel addresses are persisted, so changing them later can disconnect existing records.</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>For the webhook queue</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Trigger</td>
+<td>One message</td>
+</tr>
+<tr>
+<td>Thread</td>
+<td>A message and the replies to it in one conversation: <code>&lt;conversation&gt;:&lt;id of the first message&gt;</code></td>
+</tr>
+<tr>
+<td>Actor</td>
+<td>The sender's id on the queue, as the allowed list names it</td>
+</tr>
+<tr>
+<td>Channel address</td>
+<td>The conversation and the message a reply goes under</td>
+</tr>
+<tr>
+<td>Receiving scope</td>
+<td>A conversation, with its own row in the admission table</td>
+</tr>
+</tbody>
+</table>
+<h3 id="2-configuration-schema-fields-facts-and-health">2. Configuration: schema, fields, facts and health</h3>
+<p>The module imports what the steps below use:</p>
+<pre><code class="language-ts">import type { Context } from '@deepseek-ai/cordis'
+import { setTimeout as delay } from 'node:timers/promises'
+import { z } from 'zod'
+import { key, threadKey, type OutboundMessage, type Trigger } from '../core/index.ts'
+import { CliError } from '../infra/commands.ts'
+import { KV } from '../kv.ts'
+import { health, sourceContext, type SourceContext } from './host.ts'
+import type { SourceKind } from './kind.ts'
+</code></pre>
+<pre><code class="language-ts">const ConfigSchema = z.object({
+  conversations: z.array(z.object({
+    id: z.string().regex(/^[a-z0-9-]+$/),
+    listen: z.enum(['mentions', 'all']),
+  }).strict()).default([]),
+  pollSeconds: z.number().int().min(10).max(3600).default(30),
+}).strict()
+export type WebhookConfig = z.infer&lt;typeof ConfigSchema&gt;
+
+export const webhookKind: SourceKind&lt;WebhookConfig&gt; = {
+  kind: 'webhook',
+  title: { zh: 'Webhook 队列', en: 'Webhook queue' },
+  description: { zh: '接收 webhook 队列里下列对话的消息。', en: 'Receives the messages of these conversations from the webhook queue.' },
+  schema: ConfigSchema,
+  fields: [
+    { key: 'conversations', type: 'rows', label: { zh: '接收的对话', en: 'Conversations' }, columns: [
+      { key: 'id', type: 'text', label: { zh: '对话', en: 'Conversation' }, pattern: '[a-z0-9-]+' },
+      { key: 'listen', type: 'select', label: { zh: '接收', en: 'Receive' }, options: [
+        { value: 'mentions', label: { zh: '仅 @', en: '@ only' } }, { value: 'all', label: { zh: '全部消息', en: 'All' } }] },
+    ] },
+    { key: 'pollSeconds', type: 'number', advanced: true, min: 10, max: 3600,
+      label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' } },
+  ],
+  health: ['webhook'],
+  // find, scope, channel, threadContext, policy and environment follow in the next steps.
+}
+</code></pre>
+<ul>
+<li><code>kind</code> is the stable Source id. It appears in Trigger <code>source</code>, Thread-key prefixes, the <code>source:webhook</code> settings block and the Source Policy.</li>
+<li><code>schema</code> validates stored configuration and supplies defaults. Before an operator saves an instance, the registry creates an enabled instance from those defaults. Make defaults receive nothing; this example defaults to no conversations.</li>
+<li><code>fields</code> generates the Source settings form without custom panel code. A <code>rows</code> field edits entries keyed by its first column; <code>advanced</code> hides less common settings. Implement <code>refreshLabels</code> if the Source can resolve ids to display names. Save those names under <code>KV.sources.labels(kind)</code>. Columns with <code>choose</code> and <code>refresh</code> can then offer them.</li>
+<li>Optional <code>facts(deployment)</code> displays values derived by setup, such as the account behind a CLI. Setup currently checks only GitHub and Feishu fields listed in <code>SETUP_FIELDS</code>, so this example supplies no facts.</li>
+<li><code>health</code> declares the Source's health entries, initially <code>starting</code>. Registration claims each name and refuses collisions with entries such as <code>runtime</code>, <code>reply</code>, <code>worker</code> or effect kinds. Use the kind's name and reserve <code>sync:&lt;id&gt;</code> for Policy syncs. An <code>error</code> makes the status script exit 2 and the hourly check notify the operator, so report it only when human action may be needed.</li>
+</ul>
+<h3 id="3-translate-a-message-into-a-trigger">3. Translate a message into a Trigger</h3>
+<p>Validate CLI responses before converting them:</p>
+<pre><code class="language-ts">/** One message as `hookq pull` and `hookq thread` print it. */
+const MessageSchema = z.looseObject({
+  id: z.string().min(1), conversation: z.string().min(1), thread: z.string().optional(),
+  sender: z.looseObject({ id: z.string(), bot: z.boolean().default(false) }), mentions_me: z.boolean().default(false),
+  text: z.string(), at: z.string(), url: z.string().optional(),
+})
+type QueueMessage = z.infer&lt;typeof MessageSchema&gt;
+/** The answer of `hookq pull`, whose items are read one by one, and of `hookq thread`. */
+const PageSchema = z.looseObject({ me: z.string(), items: z.array(z.unknown()), next: z.number().int() })
+const ThreadPageSchema = z.looseObject({ items: z.array(MessageSchema), next: z.string().optional() })
+</code></pre>
+<pre><code class="language-ts">/** The Trigger of one queue message; the agent's own messages produce none. */
+export function webhookTrigger(message: QueueMessage, me: string): Trigger | undefined {
+  if (message.sender.id === me) return undefined
+  const thread = `${message.conversation}:${message.thread ?? message.id}`
+  return {
+    id: key('webhook', message.id),
+    source: 'webhook',
+    threads: [{ source: 'webhook', id: thread }],
+    actor: { source: 'webhook', id: message.sender.id },
+    human: !message.sender.bot,
+    ...(message.mentions_me ? { addressed: 'mention' as const } : {}),
+    at: message.at,
+    text: message.text,
+    channel: { source: 'webhook', thread: `webhook:${thread}`,
+      address: { conversation: message.conversation, message: message.id, ...(message.url ? { url: message.url } : {}) } },
+    ...(message.url ? { url: message.url } : {}),
+    meta: { conversation: message.conversation, messageId: message.id, root: message.thread ?? message.id },
+  }
+}
+</code></pre>
+<ul>
+<li><strong>Stable ids.</strong> Derive the Trigger id from the queue id through <code>key</code>. <code>Engine.receive</code> returns <code>duplicate</code> for stored ids, and duplicate accepts create only one Ticket. Re-reading messages is therefore safe. To treat edits as new events, include an edit version in the id, as GitHub does with comment <code>updated_at</code>.</li>
+<li><strong>Threads.</strong> The first Thread is primary and owns the Eval. Additional Threads add Correlation context. The Source chooses the id; its full key is <code>webhook:&lt;id&gt;</code>.</li>
+<li><strong>Sender.</strong> Use Source-native ids in <code>actor</code>. Set <code>human: false</code> for bots and CI. Listed bots can only become inferred candidates. An empty actor id, as for CI, uses the admission cell for unlisted, unaddressed senders. Set <code>addressed</code> to <code>mention</code> or <code>direct</code> only when the message actually addresses the agent; this gives an allowed person's message explicit strength. Never produce a Trigger for the agent's own message.</li>
+<li><strong>Reply destination and metadata.</strong> <code>channel</code> identifies where replies go; <code>url</code> links to the source message. <code>channel.thread</code> groups messages for ordered delivery: a Ticket's later messages wait behind its earlier ones until an earlier message has failed three times. Other Tickets do not wait. Keep Source-specific fields in <code>meta</code>, such as the receiving conversation and Thread root. Both <code>meta</code> and <code>text</code> are untrusted data, not authorization.</li>
+</ul>
+<p>Agents can read the new kind through <code>orchestrator_read trigger/&lt;id&gt;</code> and <code>thread/&lt;key&gt;</code>. These expose message text, disposition and neighboring Triggers. A new kind does not automatically receive a built-in skill, resources for original service records or pull-request binding.</p>
+<p>Text search works without extra code. Implement <code>find(query)</code> when people use Source-specific references such as message ids, URLs or <code>#12</code>. Return the Thread keys and search terms those references identify:</p>
+<pre><code class="language-ts">  find: query =&gt; ({ threads: [], terms: [...new Set(query.match(/\bm[0-9]+\b/g) ?? [])] }),
+</code></pre>
+<p>Here a queue message id in the query, such as <code>m42</code>, searches the Triggers for it.</p>
+<h3 id="4-what-the-source-receives-scope">4. What the Source receives: scope</h3>
+<pre><code class="language-ts">  scope({ meta }, config) {
+    const conversation = config.conversations.find(item =&gt; item.id === meta.conversation)
+    if (!conversation) return { listened: false, reason: 'conversation_not_listed' }
+    return { listened: true, observed: conversation.listen === 'all', row: conversation.id }
+  },
+</code></pre>
+<p>The Engine calls <code>scope</code> through <code>SourceRegistry</code> for each incoming Trigger. Out-of-scope messages are stored as filtered with their reason and create no Thread. Pass messages to <code>receive</code> rather than silently dropping them in the polling loop, so the panel can explain filtering.</p>
+<p><code>observed: true</code> means the Source receives unaddressed messages in that scope, allowing admission-table decisions for them. <code>row</code> identifies the corresponding admission row.</p>
+<p>Revalidation calls <code>scope</code> with the Mandate's stored metadata. Make it depend only on <code>meta</code> and configuration. Resuming requires <code>listened</code>, not <code>observed</code>. Without <code>scope</code>, a kind receives every Trigger it produces but observes none.</p>
+<h3 id="5-replies-the-channel">5. Replies: the Channel</h3>
+<pre><code class="language-ts">  channel: {
+    allowed: (address, config) =&gt; config.conversations.some(item =&gt; item.id === address.conversation),
+    send: sendWebhook,
+    link: address =&gt; ({ url: address.url ?? '',
+      label: { zh: `Webhook 对话 ${address.conversation}`, en: `Webhook conversation ${address.conversation}` } }),
+  },
+</code></pre>
+<pre><code class="language-ts">export async function sendWebhook(host: Pick&lt;SourceContext, 'commands'&gt;, message: OutboundMessage): Promise&lt;'sent' | 'gone'&gt; {
+  const { conversation, message: to } = message.channel.address
+  if (!conversation || !to) throw new Error('Missing webhook reply target')
+  try {
+    await host.commands.run('hookq', ['reply', '--conversation', conversation, '--to', to, '--key', message.id,
+      '--text', message.text])
+    return 'sent'
+  } catch (error) {
+    if (error instanceof CliError &amp;&amp; error.code === 410) return 'gone'
+    throw error
+  }
+}
+</code></pre>
+<ul>
+<li><strong>Idempotent sends.</strong> Outbox calls <code>SourceRegistry.send</code>, which invokes <code>channel.send</code>. Messages wait while the Source plugin is unloaded. A send may fail after the remote service received it, so retries must not duplicate messages. Use <code>message.id</code> as an idempotency key: <code>hookq</code> supports <code>--key</code>; GitHub stores a hidden comment marker; Feishu accepts an idempotency key.</li>
+<li><strong>Permanent versus retryable failure.</strong> Return <code>sent</code> on success and <code>gone</code> only when delivery is permanently impossible, such as the example's 410. A gone message is retained as dropped and never queued again; it appears in <code>GET sources</code> and on the Source page. Throw for other failures so Outbox retries after 5 seconds, doubling to 300 seconds. <code>CliError.code</code> is the code reported by the CLI output.</li>
+<li><strong>Allowed destinations.</strong> <code>allowed(address, config)</code> checks only the saved address and current configuration. Put every required fact in the address; for example, Feishu records whether the chat is direct. A destination no longer listened to is dropped, while a disabled Source leaves messages waiting. Without <code>allowed</code>, all addresses are permitted while the Source is enabled.</li>
+<li><strong>Links.</strong> <code>link(address, links)</code> returns the URL and label the panel displays through <code>SourceRegistry.link</code>.</li>
+</ul>
+<h3 id="6-thread-context-for-assessments">6. Thread context for assessments</h3>
+<pre><code class="language-ts">  threadContext: {
+    messageId: trigger =&gt; String(trigger.meta.messageId ?? ''),
+    // A queue thread is flat: its root, and the message a reply answers, are on its first page, as on GitHub.
+    read: async (commands, trigger, _part, cursor) =&gt; {
+      const page = ThreadPageSchema.parse(JSON.parse(await commands.run('hookq', ['thread', '--conversation',
+        String(trigger.meta.conversation), '--root', String(trigger.meta.root), '--json', ...(cursor ? ['--after', cursor] : [])])))
+      const messages = page.items.map(item =&gt; ({ id: item.id, from: item.sender.id, at: item.at, text: item.text,
+        ...(item.sender.bot ? { bot: true as const } : {}), ...(item.url ? { url: item.url } : {}) }))
+      return { messages, ...(page.next ? { next: page.next } : {}), body: { messages } }
+    },
+  },
+</code></pre>
+<p>Proactive assessment needs the conversation around a Trigger. <code>orchestrator_eval</code> reads an initial window; <code>orchestrator_eval_read</code> expands pages, the root or the parent message. Implement the optional <code>threadContext</code> interface to provide these reads:</p>
+<ul>
+<li><code>read(commands, trigger, part, cursor, config)</code> returns a <code>ContextPart</code>. Its <code>messages</code> use <code>ContextMessage</code>: <code>{id, from, at, text}</code> plus applicable <code>bot</code>, <code>deleted</code>, <code>reply_to</code>, <code>url</code>, <code>path</code> and <code>line</code> fields. <code>next</code> is omitted on the last page. <code>body</code> is the content shown to the assessing Session, here the same messages. Optional <code>status</code> can describe special results such as Feishu's <code>chat_neighbours</code>. <code>part</code> is <code>thread</code>, <code>root</code> or <code>parent</code>.</li>
+<li><code>messageId(trigger)</code> finds the Trigger's own message among them.</li>
+<li><code>images(text)</code> and <code>image(…)</code> are for a kind whose messages carry images, as Feishu's do; the example leaves them out.</li>
+</ul>
+<p>A kind without <code>threadContext</code> gives assessments no Thread context; the Trigger's own text stays readable.</p>
+<p>If messages reply to earlier messages, add <code>repliesTo(trigger)</code>. It returns the corresponding Trigger id, allowing follow-up notices and worker Inputs to show the replied-to message when stored. For example, if <code>hookq</code> supplies <code>reply_to</code> and translation stores it as <code>meta.replyTo</code>:</p>
+<pre><code class="language-ts">  repliesTo: trigger =&gt; typeof trigger.meta.replyTo === 'string' ? key('webhook', trigger.meta.replyTo) : undefined,
+</code></pre>
+<h3 id="7-who-may-ask-the-sources-part-of-the-policy">7. Who may ask: the Source's part of the Policy</h3>
+<pre><code class="language-ts">  policy: {
+    schema: z.object({ allowed: z.array(z.object({ id: z.string().min(1), name: z.string().trim().max(100).optional() }).strict())
+      .default([]) }).strict(),
+    fields: [{ key: 'allowed', type: 'rows', label: { zh: '能发起工作的发送者', en: 'Senders who may originate work' }, columns: [
+      { key: 'id', type: 'text', label: { zh: '发送者', en: 'Sender' } },
+      { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] }],
+    explicit: { zh: '名单里的人在消息里 @ 智能体。', en: 'Someone on the list mentions the agent in a message.' },
+    rows: stored =&gt; ConfigSchema.parse(stored).conversations.map(conversation =&gt; {
+      const all = conversation.listen === 'all'
+      return { id: conversation.id, label: conversation.id, note: all ? { zh: '全部消息', en: 'All' } : { zh: '仅 @', en: '@ only' },
+        cells: { listedUnaddressed: all, unlistedAddressed: true, unlistedUnaddressed: all } }
+    }),
+  },
+</code></pre>
+<ul>
+<li><code>schema</code> validates the Source Policy, including <code>allowed</code> sender ids. Id comparison is case-insensitive. Admission tables are validated separately and shared across kinds. This Policy part is saved at <code>policy.sources.webhook</code> and contributes to the Policy version.</li>
+<li><code>fields</code> generates the form under <strong>Eval → On each Source</strong>, beginning with <code>allowed</code>. <code>explicit</code> explains how to address the agent. Optional <code>unnamed: {person, bot}</code> supplies display labels for opaque ids such as Feishu's <code>ou_…</code>; this example omits it because queue ids are readable names.</li>
+<li><code>rows(config)</code> lists admission scopes and their available cells. Each row id must match the <code>row</code> returned by <code>scope</code>. Unaddressed-message cells are available only where the Source observes those messages. Kinds without <code>rows</code> use default cells.</li>
+<li>Optional <code>bots</code> lists bots eligible for inferred candidacy, using the same entry shape as <code>allowed</code>. Without it, no bot is admitted.</li>
+<li>Optional <code>sync: {label, ready(part), run(host, part, signal)}</code> refreshes membership at startup and on <strong>Sync now</strong>. Feishu uses chat membership. Failures appear under <code>sync:&lt;id&gt;</code> and retry after one minute, doubling to one hour until successful.</li>
+</ul>
+<h3 id="8-variables-for-the-executor">8. Variables for the Executor</h3>
+<pre><code class="language-ts">  environment: {
+    variables: [{ key: 'DSH_SUPERAGENT_WEBHOOK_CONVERSATION', description: {
+      zh: '接下工单的 webhook 对话；工单不是从这个来源来的时为空',
+      en: 'The webhook conversation that started the ticket; empty when the ticket did not start on this Source' } }],
+    values: ({ trigger }) =&gt; ({
+      DSH_SUPERAGENT_WEBHOOK_CONVERSATION: trigger?.source === 'webhook' ? String(trigger.meta.conversation ?? '') : '' }),
+  },
+</code></pre>
+<p>Execution settings show declared <code>variables</code> beside the prepare command even when the Source is disabled. While enabled, <code>values</code> supplies Ticket-specific values using deployment, configuration and the originating Trigger.</p>
+<p>The prepare command reads environment variables; the worker reads their values in its instructions. Use the <code>DSH_SUPERAGENT_&lt;KIND&gt;_…</code> prefix, return an empty value for Tickets from another Source, and never include credentials.</p>
+<h3 id="9-the-plugin-entry-and-its-loop">9. The plugin entry and its loop</h3>
+<pre><code class="language-ts">export const name = 'dsh-superagent-webhook'
+export const inject = ['orchestrator']
+export function apply(ctx: Context): void {
+  ctx.effect(() =&gt; ctx.orchestrator.sources.register(webhookKind), 'webhook: source kind')
+  ctx.effect(() =&gt; {
+    const source = sourceContext(ctx.orchestrator, webhookKind)
+    const controller = new AbortController()
+    // DSH ends its process on an unhandled rejection, so a failure that escapes the loop becomes the Source's health.
+    const running = watch(source, controller.signal)
+      .catch((error: unknown) =&gt; { source.report('webhook', { state: 'error', detail: String(error) }) })
+    return async () =&gt; { controller.abort(); await running }
+  })
+}
+</code></pre>
+<p>The plugin injects <code>orchestrator</code>. Its first effect registers the kind and unregisters it on disposal. The second runs the polling loop with a <code>SourceContext</code>. Disposal aborts the loop and awaits completion, including during application stop or restart.</p>
+<pre><code class="language-ts">async function watch(ctx: SourceContext, signal: AbortSignal): Promise&lt;void&gt; {
+  await ctx.ready
+  // Setup restarts dsh-superagent once it resolves the accounts; until then the Source reads nothing.
+  if (!ctx.configured()) { ctx.report('webhook', health('paused', 'setupPending')); return }
+  let failures = 0
+  while (!signal.aborted) {
+    const config = ctx.config&lt;WebhookConfig&gt;('webhook')
+    if (!config) ctx.report('webhook', health('paused', 'sourceOff'))
+    else {
+      const at = new Date().toISOString()
+      try {
+        const { read, unreadable } = await pollQueue(ctx, signal)
+        failures = 0
+        ctx.report('webhook', { state: 'ready', detail: `${read} messages, ${unreadable} unreadable`, at })
+      } catch (error) {
+        failures += 1
+        // One network failure is retried on the next round; three in a row need a person.
+        if (!signal.aborted &amp;&amp; failures &gt;= 3) {
+          ctx.report('webhook', health('error', 'pollFailures', { count: String(failures), error: String(error) }))
+        }
+      }
+    }
+    await delay((config?.pollSeconds ?? 30) * 1000, undefined, { signal }).catch(() =&gt; {})
+  }
+}
+
+/** Read the queue after the cursor, take in each message, then move the cursor past them. */
+export async function pollQueue(ctx: SourceContext, signal: AbortSignal): Promise&lt;{ read: number; unreadable: number }&gt; {
+  const after = ctx.state.get(KV.webhook.cursor) ?? 0
+  const output = await ctx.commands.withSignal(signal).run('hookq', ['pull', '--after', String(after), '--json'])
+  const page = PageSchema.parse(JSON.parse(output))
+  let unreadable = 0
+  for (const item of page.items) {
+    if (signal.aborted) throw new Error('The webhook Source stopped during the read')
+    const message = MessageSchema.safeParse(item)
+    if (!message.success) { unreadable++; continue }
+    const trigger = webhookTrigger(message.data, page.me)
+    if (!trigger) continue
+    await ctx.receive(trigger)
+    const conversation = { label: { zh: '对话', en: 'Conversation' }, value: message.data.conversation }
+    for (const ref of trigger.threads) ctx.threads.describe(threadKey(ref), { facts: { conversation } })
+  }
+  ctx.state.set(KV.webhook.cursor, page.next)
+  return { read: page.items.length, unreadable }
+}
+</code></pre>
+<ul>
+<li><strong>Setup and the switch.</strong> Wait for <code>ctx.ready</code>, and read nothing while <code>ctx.configured()</code> is false. Read <code>ctx.config(kind)</code> on every round: it is undefined while the Source is off.</li>
+<li><strong>Cursors.</strong> Store read positions in <code>ctx.state</code> using typed entries in <code>KV</code> (<code>src/kv.ts</code>), such as <code>webhook: {cursor: record&lt;number&gt;('webhook-cursor')}</code>. <code>tests/store.spec.ts</code> requires key literals to appear only in that registry. External packages can define keys with exported <code>record</code> and <code>family</code>. Setting <code>undefined</code> removes a record; <code>ctx.atomic</code> groups writes in a transaction.</li>
+</ul>
+<p>Advance a cursor only after every covered Trigger has been stored. An interrupted round leaves the cursor unchanged; stable ids make replay safe. For timestamp cursors, <code>cursorAt(started)</code> from <code>src/sources/poll.ts</code> subtracts five seconds to allow for late remote writes.
+- <strong>Thread metadata.</strong> After receiving a Trigger, call <code>ctx.threads.describe(key, {label, url, facts})</code> to populate its display information. <code>ctx.threads.patch(key, meta)</code> delegates to <code>threads.patchMeta</code>, setting Source-owned keys or removing them when the value is <code>undefined</code>. Both ignore absent Threads, including those of filtered Triggers.
+- <strong>Per-item errors.</strong> Count malformed items and continue rather than failing the entire batch. <code>validItems(item, list, tally)</code> in <code>src/infra/commands.ts</code> supports this pattern. For independently polled Threads, use <code>pollThreads</code> from <code>src/sources/poll.ts</code>; it records each failure as <code>pollError</code>. Its <code>polled</code> predicate keeps live subscriptions and a two-week window after the later of the last Trigger and Ticket end.
+- <strong>Health.</strong> Write only declared entries through <code>ctx.report</code>. <code>health(state, code, values)</code> provides fixed messages such as <code>setupPending</code>, <code>sourceOff</code> and <code>pollFailures</code>. Count consecutive failures before reporting <code>error</code>.
+- <strong>Abort.</strong> Pass the signal to <code>ctx.commands.withSignal(signal)</code> and to <code>delay</code>, and check it between items, so a stop or a restart ends the loop at once.</p>
+<p>This example does not send Source-originated notices. A Source that needs them calls <code>ctx.notify</code>; Outbox delivers them like other replies.</p>
+<p>It also does not bind Threads to Ticket completion. Use <code>ctx.tickets.bindThread</code> and <code>threadClosed</code> only when a Source's Thread lifecycle determines whether work is done, as GitHub pull requests do. The Engine still decides when the Ticket ends.</p>
+<h3 id="10-register-the-plugin">10. Register the plugin</h3>
+<p>Build the module as its own entry in <code>tsdown.config.ts</code>:</p>
+<pre><code class="language-ts">entry: { index: 'src/index.ts', 'github-watch': 'src/sources/github.ts', 'feishu-watch': 'src/sources/feishu.ts',
+  'webhook-watch': 'src/sources/webhook.ts' },
+</code></pre>
+<p>Then export the built file in <code>package.json</code> by adding <code>"./webhook-watch": "./lib/webhook-watch.js"</code> to <code>exports</code>, and add the plugin to the <code>insert</code> list of the bundle's <code>cordis.patch.yml</code>, disabled, as Feishu is:</p>
+<pre><code class="language-yaml">    - id: dsh-superagent-webhook
+      name: dsh-superagent/webhook-watch
+      disabled: true
+</code></pre>
+<p>Enable the plugin in a profile's <code>cordis.patch.yml</code> with <code>id: dsh-superagent-webhook</code> and <code>disabled: false</code>. Build and restart. The new Source appears in Sources settings and under <strong>Eval → On each Source</strong>.</p>
+<p>Add its module and spec to the module and test tables in <a href="007-architecture.html">007 Architecture</a>. <code>tests/docs.spec.ts</code> checks that both indexes are complete.</p>
+<h3 id="11-tests">11. Tests</h3>
+<p>Create <code>tests/webhook.spec.ts</code> using the pattern in <code>tests/sources.spec.ts</code>: a real Store in a temporary directory, a <code>SourceRegistry</code> with <code>HealthBoard</code>, an Engine with stand-in ports, and a <code>SourceContext</code> from <code>sourceContextOf</code>.</p>
+<p>Mock CLI calls by spying on <code>Commands.run</code>. Also spy on <code>withSignal</code>, because it normally returns a new <code>Commands</code> instance.</p>
+<pre><code class="language-ts">function host(overrides: Partial&lt;SourceContextDeps&gt; = {}) {
+  const store = new Store(join(mkdtempSync(join(tmpdir(), 'webhook-')), 'db.sqlite'))
+  store.saveSettings(SettingsSchema.parse({
+    sources: { webhook: { enabled: true, config: { conversations: [{ id: 'ops', listen: 'mentions' }] } } },
+    policy: { sources: { webhook: { allowed: [{ id: 'alice' }] } } },
+  }))
+  // The registry claims the kind's health entries on the board, where the test reads them.
+  const board = new HealthBoard()
+  const sources = new SourceRegistry(() =&gt; store.settings(), board)
+  sources.register(webhookKind)
+  const engine = new Engine({ repo: store, scope: sources, policy: () =&gt; settingsPolicy(store.settings(), sources),
+    assessor: { request: vi.fn() }, executor: { start: vi.fn(), deliver: vi.fn(), stop: vi.fn() },
+    outbox: { send: vi.fn(), status: () =&gt; undefined, withdraw: vi.fn() } })
+  const commands = new Commands(() =&gt; testDeployment(), {}, new AbortController().signal)
+  const receive = vi.fn((trigger: Trigger) =&gt; { const result = engine.receive(trigger); engine.evaluateDue(); return result })
+  // The Source's own notices go to the outbox, which keeps their receipts and sends nothing here.
+  const deps: SourceContextDeps = { store, engine, outbox: { send: message =&gt; { store.receipts.add(message) } }, commands, sources,
+    deployment: testDeployment(), ready: Promise.resolve(), configured: () =&gt; true, receive, ...overrides }
+  return { ...deps, store, engine, commands, receive, health: board.all, ctx: sourceContextOf(deps, webhookKind) }
+}
+/** The queue as `hookq` answers it. */
+function queue(h: ReturnType&lt;typeof host&gt;, answer: () =&gt; unknown) {
+  vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+  return vi.spyOn(h.commands, 'run').mockImplementation(async () =&gt; JSON.stringify(answer()))
+}
+
+it('takes in what the queue holds after the cursor, once, and moves the cursor after it', async () =&gt; {
+  const h = host()
+  queue(h, () =&gt; ({ me: 'agent', items: [message('m1'), { id: 'broken' }, message('m2', { conversation: 'elsewhere' })], next: 3 }))
+  expect(await pollQueue(h.ctx, new AbortController().signal)).toEqual({ read: 3, unreadable: 1 })
+  expect(await h.receive.mock.results[0]!.value).toBe('stored')
+  expect(await h.receive.mock.results[1]!.value).toBe('filtered')
+  expect(h.store.get(KV.webhook.cursor)).toBe(3)
+  // An allowed sender who mentions the agent makes an explicit request.
+  expect(h.engine.candidate(key('webhook', 'm1'))?.strength).toBe('explicit')
+  await pollQueue(h.ctx, new AbortController().signal)
+  expect(await h.receive.mock.results[2]!.value).toBe('duplicate')
+  h.store.close()
+})
+</code></pre>
+<p><code>message(id, fields)</code> builds a queue item. Cover at least:</p>
+<ul>
+<li>the translation: a stable id, the Thread, the actor, <code>human</code> and <code>addressed</code>, and no Trigger for the agent's own message;</li>
+<li>a round: Triggers stored once, one outside the scope <code>filtered</code>, the cursor moved after them, an allowed sender's mention evaluated as <code>explicit</code>;</li>
+<li>a round cut short, which keeps its cursor;</li>
+<li><code>send</code>: <code>sent</code>, <code>gone</code> for a 410 only, and a throw for any other failure, with the CLI's error built by <code>commandError</code>;</li>
+<li>the Thread context: the messages of a page and the cursor of the next, as <code>tests/registry.spec.ts</code> reads a kind's Threads through <code>SourceRegistry.threadContext</code>;</li>
+<li>the plugin: <code>apply</code> registers the kind and reports <code>setupPending</code> while setup waits, its disposers unregister the kind, and a failure that escapes the loop becomes the Source's health instead of an unhandled rejection;</li>
+<li>the Source's part of the Policy and its admission rows, as <code>tests/registry.spec.ts</code> and <code>tests/policy.spec.ts</code> check the Feishu Source's.</li>
+</ul>
+<h3 id="checklist">Checklist</h3>
+<ol>
+<li>Map Triggers, Threads, actors, Channel addresses and receiving scopes.</li>
+<li>Write the kind: <code>schema</code>, <code>fields</code>, <code>health</code>, and <code>facts</code> if setup derives any.</li>
+<li>Translate events into Triggers with stable ids, and drop the agent's own.</li>
+<li>Decide what the Source receives in <code>scope</code>, from <code>meta</code> alone.</li>
+<li>Give it a Channel whose <code>send</code> posts each message once and answers <code>gone</code> only when the conversation can never receive it.</li>
+<li>Give assessments its Thread context, if it can read a Thread.</li>
+<li>Give it a part of the Policy with <code>allowed</code> and the admission rows.</li>
+<li>Register its execution environment variables.</li>
+<li>Write the plugin entry and a loop that waits for setup, follows the switch, moves cursors after <code>receive</code>, keeps errors per item, reports health and stops on abort; name the cursors in <code>KV</code>.</li>
+<li>Add the build entry, the export and the <code>cordis.patch.yml</code> insert, and list the module and its spec in the tables of 007.</li>
+<li>Test it as <code>tests/sources.spec.ts</code> tests the other Sources.</li>
+</ol>
+</article>
+</main>
+</body>
+</html>

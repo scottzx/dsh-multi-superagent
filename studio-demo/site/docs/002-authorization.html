@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>002 Authorization · dsh-superagent 演示</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="../index.html">dsh-superagent<span>MODELSCOPE STUDIO 演示</span></a>
+  <nav><div class="group">概览</div><a class="nav" href="../index.html">首页</a><a class="nav" href="../setup.html">快速开始 SETUP</a><div class="group">设计文档</div><a class="nav" href="000-philosophy.html">000-philosophy</a><a class="nav" href="001-domain.html">001-domain</a><a class="nav active" href="002-authorization.html">002-authorization</a><a class="nav" href="003-execution.html">003-execution</a><a class="nav" href="004-prompts.html">004-prompts</a><a class="nav" href="005-panel.html">005-panel</a><a class="nav" href="006-deployment.html">006-deployment</a><a class="nav" href="007-architecture.html">007-architecture</a><a class="nav" href="008-cookbook.html">008-cookbook</a><a class="nav" href="009-multi-superagent.html">009-multi-superagent</a></nav>
+  <footer>部署于 ModelScope 创空间 · Docker</footer>
+</aside>
+<main>
+<article class="content">
+<h1 id="002-authorization">002 Authorization</h1>
+<p>Authorization determines who may start work and what that work may include. This document builds on <a href="001-domain.html">001 Domain model</a>.</p>
+<p>The host enforces allowed lists, rules and Mandates. Messages, comments and quoted documents are inputs to a decision; they cannot change those permissions.</p>
+<h2 id="two-paths-for-a-trigger">Two paths for a Trigger</h2>
+<h3 id="eval-deciding-whether-to-start-work">Eval: deciding whether to start work</h3>
+<p>The Source records whether a message addresses the agent: <code>mention</code> for a mention of the bot or agent account, and <code>direct</code> for a direct message. The gate checks the sender and the Source's Policy:</p>
+<ul>
+<li>An allowed person who addresses the agent makes an explicit request.</li>
+<li>A person's follow-up on a Thread with Tickets follows the rules below.</li>
+<li>Other human messages use the admission table for their receiving scope.</li>
+<li>A bot on the Source's bot list can produce an inferred candidate, never an explicit request. Other bots are not admitted.</li>
+</ul>
+<h3 id="subscriptions-continuing-existing-work">Subscriptions: continuing existing work</h3>
+<p>Every message on a subscribed Thread reaches its subscribed Tickets as context, including messages from bots and CI. This delivery bypasses the gate and grants no new authority. Each Ticket remains limited by its Mandate.</p>
+<p>A person's message on a Ticket's own Thread belongs to that Ticket's Executor to decide. The same applies when the main Session attaches a message to a Ticket. While an Executor owns the message, it takes no Eval and gets no Decision. Each Executor either handles the request within its Ticket's scope or hands it back for routing elsewhere.</p>
+<p>Ownership continues while the Ticket is live, even if a person removes its Subscription. It also covers an ended Ticket that was not stopped by a person and has the message waiting to resume it.</p>
+<p>The main Session receives a follow-up notice. While an Executor owns the message, the main Session may only stop work on the person's request; accept, attach, ignore and requeue are refused. A stop still passes through the gate with the follow-up strength described below.</p>
+<h3 id="handing-back-and-releasing-follow-ups">Handing back and releasing follow-ups</h3>
+<p>An Executor hands a message back once when it asks for work beyond the Ticket's scope or belongs to another Ticket. The Ticket keeps its Subscription. If an attached Thread is unrelated, the Executor hands back the messages it owns there.</p>
+<p>A message goes to a fresh Eval only after no Ticket still owns it. Its candidate includes the Executors' reasons. The gate judges it as an ordinary message on that Thread, and the main Session can accept it, attach it elsewhere or ignore it. Handing back a message the Ticket did not own, such as a bot message or one a person already sent to Eval, queues nothing.</p>
+<p>When a Ticket ends, it releases follow-ups its Executor did not read or take up. These include messages never delivered to the Executor and messages delivered after its last Report or turn end, provided it neither acknowledged, answered nor handed them back. Each released message goes to Eval when no other Ticket owns it. A stop ends only the stopped Ticket's work.</p>
+<p>A stopped Ticket does not send its stop message to Eval again unless another Ticket handed it back. The main Session that stopped it may accept the rest of the message as new work.</p>
+<p>A person can send an owned follow-up to Eval from the panel. If the main Session then attaches it back to a live Ticket, the Executor receives it again. The panel also offers re-evaluation when no effective judgement covers the message.</p>
+<h3 id="context-only-subscriptions">Context-only subscriptions</h3>
+<p>An Executor can follow a related Thread, such as another Issue or pull request, for context. Its messages reach the Ticket but grant no authority or follow-up strength. Human messages there do not resume an ended Ticket unless the main Session attaches a message from that Thread. Notes from the main Session about other work are also context only.</p>
+<p>Human messages that reach no Ticket, including Threads whose Tickets were stopped by a person, take the Eval path. Bot messages take that path independently of their delivery to subscribed Tickets.</p>
+<h2 id="strength">Strength</h2>
+<table>
+<thead>
+<tr>
+<th>Strength</th>
+<th>Cases</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>explicit</td>
+<td>A person on the list addresses the agent, or follows up on a Thread that already has a Ticket; a cell of the admission table set to explicit request</td>
+</tr>
+<tr>
+<td>inferred</td>
+<td>A person not on the list follows up on a Thread with a Ticket, unless their cell of the admission table is explicit; a cell of the admission table set to inferred candidate; a message of a bot on the Source's bot list that addresses the agent or arrives where the Source receives every message</td>
+</tr>
+<tr>
+<td>not admitted</td>
+<td>Any other bot's message, everything the admission table ignores, and every inferred case while the accept mode is <code>off</code></td>
+</tr>
+</tbody>
+</table>
+<p>For an unlisted person, an explicit admission cell takes precedence even on a Thread with Tickets and works in every accept mode. Otherwise their follow-up is inferred and is not admitted in <code>off</code> mode. Messages on Threads followed only for context use the admission table instead of follow-up strength.</p>
+<h2 id="admission">Admission</h2>
+<p>Each Source's Policy has an admission table. Its rows are receiving scopes:</p>
+<ul>
+<li><strong>Feishu:</strong> each configured chat, other chats the bot receives mentions from, and direct messages. Other chats are received only when <strong>其他群</strong> is set to <strong>仅 @</strong> on the Feishu card.</li>
+<li><strong>GitHub:</strong> new Issues, new pull requests, comments and the default branch's CI.</li>
+</ul>
+<p>A row has up to three cells. Each cell decides whether a message becomes an explicit request, an inferred candidate or nothing:</p>
+<table>
+<thead>
+<tr>
+<th>Cell</th>
+<th>Choices</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>On the list, not addressing the agent</td>
+<td>inferred, ignore</td>
+<td>inferred</td>
+</tr>
+<tr>
+<td>Not on the list, addressing the agent</td>
+<td>explicit, inferred, ignore</td>
+<td>ignore</td>
+</tr>
+<tr>
+<td>Not on the list, not addressing the agent</td>
+<td>inferred, ignore</td>
+<td>ignore</td>
+</tr>
+</tbody>
+</table>
+<p>Cells for unaddressed messages are available only where the Source receives every message, such as a Feishu chat set to <strong>全部消息</strong> or a GitHub scope with its receive-all switch enabled. A CI result has no sender, so its row offers only the last cell. Bot messages use the bot list instead of these cells.</p>
+<p>Setting the unlisted-addressed cell to explicit lets anyone in that scope request work by mentioning the agent. This can be useful for a dedicated support chat. Inferred candidates still depend on the accept mode. Follow-ups normally bypass this table, except that an explicit cell still grants explicit strength.</p>
+<p>The admission table is part of the Policy version. Weakening a cell does not immediately stop open Tickets accepted under it. It can revoke their Mandates when they are revalidated before resuming.</p>
+<h3 id="bots-and-automated-reviewers">Bots and automated reviewers</h3>
+<p>The host recognizes GitHub Apps, logins ending in <code>[bot]</code>, and Feishu bots as bots. A Source can list bots such as <code>dependabot[bot]</code> whose messages may become inferred candidates. They must either address the agent or post in a scope that receives every message. They cannot make explicit requests or stop Tickets.</p>
+<p>An automated reviewer using an ordinary account counts as a person to the host. Its comments reach subscribed Tickets and generate follow-up notices. Team prompt text must identify such accounts as automated reviewers.</p>
+<h2 id="routing-candidates">Routing candidates</h2>
+<p>The main Session routes explicit candidates with <code>orchestrator_route</code>. One call can contain several accept, attach, stop or ignore decisions. Each item is processed independently: a refused item or a missing field does not prevent the others from running.</p>
+<p>An inferred candidate normally needs a full assessment. There is one shortcut: if its card clearly touches no enabled rule, such as plain chat or unrelated discussion, the main Session may ignore it directly. The Decision records <code>ignoredFromCard</code> to distinguish this from a rule assessment. The main Session reads the enabled rules in its Policy prompt section.</p>
+<p>Accepting an inferred candidate always requires an assessment. Direct accept refuses a Trigger that the gate did not admit as explicit.</p>
+<h2 id="accept-mode-and-rules">Accept mode and rules</h2>
+<p>The accept mode is part of the Policy:</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>off</code></td>
+<td>Nothing inferred becomes a candidate, such as an unaddressed message, a bot's message or the follow-up of a person not on the list</td>
+</tr>
+<tr>
+<td><code>observe</code> (default)</td>
+<td>Inferred candidates are assessed; a positive assessment is recorded as ignore marked "would accept", and nothing is accepted</td>
+</tr>
+<tr>
+<td><code>auto</code></td>
+<td>A positive assessment of an inferred candidate accepts it</td>
+</tr>
+</tbody>
+</table>
+<p>Explicit requests work in every mode. Start in <code>observe</code> and switch to <code>auto</code> after reviewing the recorded Decisions. Each assessment judges every enabled rule exactly once, whether it matches or not. A proactive accept requires at least one matching rule.</p>
+<p>Each rule describes a kind of proactive work. The Ticket's Mandate records the matched rules, and its Executor receives their names and instructions.</p>
+<p>For that Ticket, a rule's process and communication requirements override the defaults. A silence rule can suppress an acknowledgement; a review rule can name the required reviewer and approval before merge. Requirements that apply to every Ticket belong in team prompt sections instead.</p>
+<h2 id="policy-version">Policy version</h2>
+<p>Rules, accept mode and each Source's Policy form the Policy version. Every Mandate records the version under which it was accepted.</p>
+<p>A version change discards running Evals and queues their Triggers again. It also sends a policy-changed Input to each affected live Ticket. The Input explains whether:</p>
+<ul>
+<li>a matched rule changed, including its new text, or no longer applies;</li>
+<li>the requester may no longer start work; or</li>
+<li>proactive work is no longer accepted, for example because the mode changed from <code>auto</code>.</li>
+</ul>
+<p>Unaffected Tickets receive no notice. The change does not immediately revoke live Tickets' Mandates.</p>
+<p>Source configuration is separate from Policy. It controls what enters the system: which chats are read and whether a scope receives all messages or only mentions. A Mandate records its Source and receiving scope. Resuming needs the Source to still listen to the Thread, but does not require it to still receive every message there.</p>
+<p>Replies wait while their Source is off. They are dropped if the Source no longer listens to their destination.</p>
+<p>A condition on what the Executor may do with its own result, such as when it may merge, does not decide who may authorize work. It is part of the agent's instructions, not of the Policy.</p>
+<h2 id="resume-and-stop">Resume and stop</h2>
+<p>An ended Ticket keeps its Mandate. A person's message on one of its own Threads can resume the same work without a new Eval or Decision, regardless of who sent it. Bots and CI do not wake ended Tickets. The Executor decides whether the request fits the scope and ends the round if it does not.</p>
+<p>Only three operations change a Mandate: accept creates it, a person's stop withdraws it, and failed revalidation revokes it. A Ticket stopped by a person stays ended and receives nothing more. Work requested there needs a new accept.</p>
+<h3 id="revalidation-before-resume">Revalidation before resume</h3>
+<p>The Source must still listen to the original Thread. The remaining checks depend on the Mandate's basis:</p>
+<ul>
+<li>An explicit follow-up Mandate passes.</li>
+<li>An inferred Mandate needs <code>auto</code> mode and its matched rules still enabled.</li>
+<li>A Mandate admitted by a table cell must still receive at least its original strength under today's table and sender membership. Removing a sender from the list can therefore revoke a Mandate accepted through the listed-sender cell.</li>
+<li>A bot's Mandate requires that bot to remain on the Source's bot list. Inferred table and bot Mandates also need <code>auto</code> mode and enabled matched rules.</li>
+<li>Other Mandates require the sender to remain on the Source's allowed list.</li>
+</ul>
+<p>If revalidation fails, the Ticket stays ended and takes none of its waiting messages. Each message is treated as having reached no Ticket; if no other Ticket owns it, it goes to Eval. The main Session is not told it reached a worker. This also applies after a processing pause. Attaching to the Ticket is refused, and further work requires a new accept.</p>
+<ul>
+<li><strong>A person saying "stop" in a Thread is an ordinary Trigger,</strong> and Eval decides stop. An Executor cannot declare that a person asked it to stop.</li>
+<li><strong>Stop in the panel is a command.</strong> It acts on the Ticket directly and is recorded as a manual stop.</li>
+<li><strong>Waiting conditions belong to Sources.</strong> A condition such as "no assignee for N hours" would be a Source that waits and checks again itself; Eval never waits.</li>
+</ul>
+<h2 id="when-eval-does-not-finish">When Eval does not finish</h2>
+<p>The time limit starts when the candidate reaches the main Session. Time spent waiting for delivery does not count, and an undelivered candidate never expires.</p>
+<p>An expired Eval queues its Triggers for another attempt. After two consecutive retries, the third expiry records <code>unavailable</code>. An assessment failure also records <code>unavailable</code>; a later Trigger can start a new Eval. A Policy change or a decision made against an outdated Policy records <code>unavailable</code> and immediately queues the batch under the current version.</p>
+<p>The <code>evals</code> health entry reports unresolved unavailable Decisions from the last hour. <code>scripts/dsh-superagent status</code> includes that error.</p>
+<p>The panel asks for human attention only when the unavailable Decision is less than 24 hours old, is still the latest Decision on its Thread, has not been dismissed, and the Thread is neither queued nor evaluating. A person can evaluate the Trigger again or dismiss the problem.</p>
+</article>
+</main>
+</body>
+</html>

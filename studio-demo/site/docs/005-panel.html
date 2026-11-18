@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>005 Panel · dsh-superagent 演示</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="../index.html">dsh-superagent<span>MODELSCOPE STUDIO 演示</span></a>
+  <nav><div class="group">概览</div><a class="nav" href="../index.html">首页</a><a class="nav" href="../setup.html">快速开始 SETUP</a><div class="group">设计文档</div><a class="nav" href="000-philosophy.html">000-philosophy</a><a class="nav" href="001-domain.html">001-domain</a><a class="nav" href="002-authorization.html">002-authorization</a><a class="nav" href="003-execution.html">003-execution</a><a class="nav" href="004-prompts.html">004-prompts</a><a class="nav active" href="005-panel.html">005-panel</a><a class="nav" href="006-deployment.html">006-deployment</a><a class="nav" href="007-architecture.html">007-architecture</a><a class="nav" href="008-cookbook.html">008-cookbook</a><a class="nav" href="009-multi-superagent.html">009-multi-superagent</a></nav>
+  <footer>部署于 ModelScope 创空间 · Docker</footer>
+</aside>
+<main>
+<article class="content">
+<h1 id="005-panel">005 Panel</h1>
+<p>Open <strong>Superagent</strong> in the DeepSeek Harness Web sidebar to supervise the agent. The panel prioritizes work that needs a person, then system health and history. This document builds on <a href="000-philosophy.html">000 Philosophy</a> through <a href="004-prompts.html">004 Prompts</a>.</p>
+<h2 id="three-questions">Three questions</h2>
+<p>Opening the panel answers three questions, in this order:</p>
+<ol>
+<li>Does anything need me now?</li>
+<li>Is the system healthy and doing the right things?</li>
+<li>What is the history of one piece of work, from Trigger through Eval to Ticket?</li>
+</ol>
+<h2 id="tabs">Tabs</h2>
+<p>The tabs follow the workflow: <strong>Overview</strong>, <strong>Source</strong>, <strong>Trigger</strong>, <strong>Eval</strong>, <strong>Execution</strong>, and <strong>Settings</strong>. Until repository and account setup succeeds, Overview shows what is missing and links to the relevant setting.</p>
+<table>
+<thead>
+<tr>
+<th>Tab</th>
+<th>Shows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Overview</td>
+<td>Tickets needing action, system problems, activity counts for the last 24 hours, and Executor load. Each block links to its detailed page</td>
+</tr>
+<tr>
+<td>Source</td>
+<td>Source state, setup problems and non-zero counts. Filtered Triggers and dropped messages cover the same 24-hour window as Overview</td>
+</tr>
+<tr>
+<td>Trigger</td>
+<td>Threads filtered by Subscribed, Evaluating, New Triggers in 24 h, or All Threads. Each Thread shows its Triggers newest first, Decisions and Subscriptions</td>
+</tr>
+<tr>
+<td>Eval</td>
+<td>Decisions with their reason and matched rules</td>
+</tr>
+<tr>
+<td>Execution</td>
+<td>Executor state, Pause processing, and Tickets filtered by Open, Pending, Working, Waiting for a Trigger or Ended. Ticket details show actions, authorization, waiting Inputs, Subscriptions and Assignments</td>
+</tr>
+<tr>
+<td>Settings</td>
+<td>Sources, Eval, Execution, Prompts and Deployment. Each group includes its save history</td>
+</tr>
+</tbody>
+</table>
+<h3 id="reading-individual-records">Reading individual records</h3>
+<p>A dropped message links to its Ticket, or to its Thread when it has no Ticket. The Source page explains whether its conversation disappeared or the Source stopped listening to it.</p>
+<p>A human follow-up still owned by an Executor is marked <strong>Delivered to Ticket</strong>, without an Eval. The Thread also shows hand-back reasons and context-only Subscriptions. <strong>Evaluate again</strong> can send that follow-up to Eval, or retry a Trigger with no effective judgement: one filtered by its Source, an unavailable Eval, or a delivered message with neither a non-stop Decision nor an Executor acknowledgement.</p>
+<p>Ticket details show the originating Trigger, Decision and reason, scope and Policy version. Assignments and secondary details are folded below the immediate actions. <strong>Retry</strong> is available for failed Input delivery or a Ticket waiting for a person after a blocked or failed Report. Ended Tickets show outcomes such as <strong>Pull request merged</strong> or <strong>Stopped by a person</strong>.</p>
+<h2 id="settings-groups">Settings groups</h2>
+<ul>
+<li><strong>Sources:</strong> one card per Source with its switch, fields and verified account facts. GitHub also offers receive-all switches for new Issues, pull requests, comments and default-branch CI. Polling and read limits are under Advanced.</li>
+<li><strong>Eval:</strong> the Policy version and rules, followed by <strong>On each Source</strong> and the Eval settings. Each Source tab contains its allowed list, membership sync, admission table and bot list. Sync runs at startup and on <strong>Sync now</strong>. The admission table distinguishes receiving scope, sender membership and whether the message addresses the agent. Eval settings select the accept mode, timeout and assessment model.</li>
+<li><strong>Execution:</strong> worker model, concurrency, directory root, prepare command and blocked commands. Clicking an available variable inserts it into the prepare command.</li>
+<li><strong>Prompts:</strong> <strong>Edit</strong> changes team sections, built-in parts and skills. <strong>Full prompt</strong> shows the assembled text and compares it with saved text or defaults. <strong>History</strong> lists versions. Edited built-in parts are marked changed and can be reset; templates list their required placeholders.</li>
+</ul>
+<p>An upgrade that changes an overridden default marks it <strong>Default updated</strong> (默认内容已更新). The panel compares the old and new defaults above the team's text. If the old default was not recorded, it compares the team's text with the new default instead. Choose <strong>Keep my text</strong> or <strong>Use the new default</strong>. Overrides for removed parts are listed below the tab bar and dropped on the next save.
+- <strong>Deployment:</strong> startup problems with <strong>Check again</strong>, the state directory and machine limits. Saved limits apply without restart. The DeepSeek Harness Plugin Manager exposes the same page.</p>
+<h2 id="search">Search</h2>
+<p>The header search finds Triggers by text, id, Feishu message id or a stored link, such as a GitHub comment URL. A Feishu link missing from the original message becomes searchable only after the host reads it during the current process lifetime.</p>
+<p>Search also finds Threads by references such as <code>#12</code> or a GitHub URL, and Tickets by title or a matching Thread.</p>
+<h2 id="principles">Principles</h2>
+<ol>
+<li><strong>Focus on what matters.</strong> Every element answers one of the three questions, or it is removed. A number appears only when it changes what the supervisor does.</li>
+<li><strong>Precise definitions.</strong> Categories have checkable definitions, are mutually exclusive and cover every case, as the Ticket stages do. A label says whom a row waits for and what it needs, not an internal status code.</li>
+<li><strong>One place per concept.</strong> Source state belongs in Source; Threads and Triggers in Trigger; Decisions in Eval; Tickets in Execution. Settings are grouped by the concept they configure. Overview summarizes these pages and links to them instead of becoming another detailed view.</li>
+<li><strong>Domain structure.</strong> The panel uses the domain terms. Internal identifiers appear only in folded details, and names replace identifiers where they can be resolved.</li>
+<li><strong>Honest state.</strong> A count equals the length of the list it links to, and no state contradicts another fact.</li>
+<li><strong>Quiet by default.</strong> Healthy states take no extra space. Problems must be actionable; a one-off network error is not enough. Rows needing a person offer their action directly. Keep page explanations to one sentence and put further detail in the (?) tooltip. Destructive actions require confirmation.</li>
+<li><strong>Consistent controls.</strong> Use DeepSeek Harness design tokens and control behavior. The same information should look the same throughout the panel. Each settings block has one save bar, visible only while changes exist, a save runs or a save fails.</li>
+</ol>
+</article>
+</main>
+</body>
+</html>
