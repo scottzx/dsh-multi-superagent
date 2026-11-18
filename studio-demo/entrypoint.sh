@@ -19,7 +19,7 @@ if ! kill -0 "$DSH_PID" 2>/dev/null; then
     DSH_PID=$!
 fi
 
-# The web login token is printed on boot; bake it into the nginx config so a
+# The web login token is printed on boot; bake it into the nginx bounce so a
 # bare visit to / lands inside the panel.
 TOKEN=""
 i=0
@@ -30,13 +30,18 @@ while [ "$i" -lt 30 ]; do
     sleep 1
 done
 
-sed "s|{{TOKEN}}|$TOKEN|g" /opt/dsh-superagent/studio-demo/nginx.conf.template \
+if [ -n "$TOKEN" ]; then
+    BOUNCE='if ($dsh_bounce = "00") { return 302 /?token='"$TOKEN"'; }'
+else
+    BOUNCE='# bounce disabled: no web token captured'
+fi
+sed "s|{{BOUNCE}}|$BOUNCE|" /opt/dsh-superagent/studio-demo/nginx.conf.template \
     > /etc/nginx/conf.d/dsh-demo.conf
 
 if [ -n "$TOKEN" ]; then
     echo "[entrypoint] dsh web ready; panel token captured"
 else
-    echo "[entrypoint] WARN: no web token in $LOG yet; / redirects to a blank token"
+    echo "[entrypoint] WARN: no web token in $LOG yet; / serves the panel login directly"
 fi
 echo "[entrypoint] nginx listening on 7860 (panel at /, docs at /demo/)"
 exec nginx -g 'daemon off;'
