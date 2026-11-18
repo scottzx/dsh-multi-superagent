@@ -5,6 +5,7 @@ import type { Localized } from '../sources/kind.ts'
 import type { SetupProblem } from '../setup.ts'
 import type { Health } from '../sources/host.ts'
 import { reasonText, type Reason } from '../core/reasons.ts'
+import { ALL_HANDS_ID } from '../core/model.ts'
 
 export type T = Translate<DshSuperagentKey>
 export const errorText = (failure: unknown): string => failure instanceof Error ? failure.message : String(failure)
@@ -32,6 +33,11 @@ function label(t: T, reason: Reason): string {
   return written
 }
 export const setupText = (t: T, problem: Pick<SetupProblem, 'code' | 'values'>): string => t(`setup.${problem.code}`, problem.values)
+/**
+ * The name a team is shown under: the standing all-hands group has the panel's own wording, not the name it is stored under.
+ */
+export const teamName = (t: T, team: { id: string; name: string }): string =>
+  team.id === ALL_HANDS_ID ? t('teamAllHands') : team.name
 export const healthText = (t: T, health: Pick<Health, 'detail' | 'code' | 'values'>): string =>
   health.code ? t(`healthCode.${health.code}` as const, health.values) : health.detail
 /** Replaces Feishu and GitHub content placeholders (images, cards, media, forwards, unresolved mentions) with localized labels. */

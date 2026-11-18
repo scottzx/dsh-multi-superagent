@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { Engine, MemoryRepositories, UserError, inCycle, superagentWorkspace, type Assessor, type EngineOptions, type Executor, type OutboundMessage, type Policy,
-  type SuperagentRunner, type Team, type TeamTask } from '../src/core/index.ts'
+import { Engine, ALL_HANDS_ID, HUMAN_ID, MemoryRepositories, TEAM_HOP_LIMIT, UserError, inCycle, superagentWorkspace, type Assessor, type EngineOptions, type Executor,
+  type OutboundMessage, type Policy, type SuperagentRunner, type Team, type TeamTask } from '../src/core/index.ts'
 
 /** A minimal Policy: the team's delegation only reads its version. */
 const policy = (): Policy => ({ version: 'v1', paused: false, evalTimeoutMs: 60_000, gate: () => ({ admissible: false, reason: 'n/a' }),
@@ -53,8 +53,9 @@ describe('the team of superagents', () => {
     expect(engine.superagent('a')?.directory).toBe('/srv/copy')
     // A bound directory wins; an absent or blank one falls back to the state directory.
     expect(superagentWorkspace(engine.superagent('a'), '/state')).toBe('/srv/copy')
-    expect(superagentWorkspace(engine.superagent('b'), '/state')).toBe('/state')
-    expect(superagentWorkspace({ id: 'x', name: 'X', role: 'specialist', directory: '   ', createdAt: '' }, '/state')).toBe('/state')
+    // An unbound superagent gets its own directory under the state directory, so its AGENTS.md is its own.
+    expect(superagentWorkspace(engine.superagent('b'), '/state')).toBe('/state/superagents/b')
+    expect(superagentWorkspace({ id: 'x', name: 'X', role: 'specialist', directory: '   ', createdAt: '' }, '/state')).toBe('/state/superagents/x')
     expect(superagentWorkspace(undefined, '/state')).toBe('/state')
   })
 
@@ -124,7 +125,7 @@ describe('the team of superagents', () => {
     expect([...inCycle(tasks)].sort()).toEqual(['x', 'y'])
   })
 
-  it('records team messages and delivers them to a running member', () => {
+  it('records team messages, and mentions reach a running turn while unmentioned talk does not', () => {
     const { engine, runner } = harness()
     engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
@@ -133,7 +134,10 @@ describe('the team of superagents', () => {
     engine.proposeTeam('t1', [{ assigneeId: 'a', text: 'do A' }, { assigneeId: 'b', text: 'do B', after: ['a'] }])
     engine.dispatchTeam('t1')
     engine.sendTeamMessage('t1', 'lead', 'a heads up', 'discussion')
-    // The message reached A's running turn; B's turn is waiting on A, so it was not delivered.
+    // Nothing was mentioned, so the line is recorded but reaches no turn: a running turn is not steered either.
+    expect((runner.deliver as ReturnType<typeof vi.fn>).mock.calls).toEqual([])
+    engine.sendTeamMessage('t1', 'lead', 'a heads up', 'discussion', { mentions: ['a'] })
+    // A was mentioned, so its running turn reads it; the batch is what a turn that is idle would be woken with.
     expect((runner.deliver as ReturnType<typeof vi.fn>).mock.calls.map(call => call[1].assigneeId)).toEqual(['a'])
     expect(engine.messages('t1').at(-1)?.text).toBe('a heads up')
     // A non-member cannot write to the team.
@@ -157,7 +161,7 @@ describe('the team of superagents', () => {
     expect(dispatched[0]).toEqual({ task_id: expect.any(String), assignee_id: 'a', state: 'working' })
   })
 
-  it('routes a direct conversation to its running member only', () => {
+  it('routes a direct conversation only to the members it mentions', () => {
     const { engine, runner } = harness()
     engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
@@ -165,8 +169,8 @@ describe('the team of superagents', () => {
     engine.addTeam({ id: 'direct', name: 'private', kind: 'direct', memberIds: ['a', 'b'], createdAt: '' })
     engine.proposeTeam('direct', [{ assigneeId: 'a', text: 'do A' }])
     engine.dispatchTeam('direct')
-    engine.sendTeamMessage('direct', 'b', 'just between us', 'discussion')
-    // A's running turn received it; the sender (B) has no running turn, so only A was delivered.
+    engine.sendTeamMessage('direct', 'b', 'just between us', 'discussion', { mentions: ['a'] })
+    // A was mentioned, so its running turn reads it; the sender (B) has no running turn, so only A was delivered.
     expect((runner.deliver as ReturnType<typeof vi.fn>).mock.calls.map(call => call[1].assigneeId)).toEqual(['a'])
     expect(engine.messages('direct').at(-1)?.from).toBe('b')
   })
@@ -186,26 +190,131 @@ describe('the team of superagents', () => {
     expect(() => engine.closeTeam('t1', 'lead', 'again')).toThrow(UserError)
   })
 
-  it('wakes an idle member for talk without starting a task', () => {
-    const talk = vi.fn()
-    const { engine } = harness({ start: vi.fn(), deliver: vi.fn(), stop: vi.fn(), talk })
+  it('wakes only the members a message mentions, and never searches the text', () => {
+    const wake = vi.fn()
+    const { engine } = harness({ start: vi.fn(), deliver: vi.fn(), stop: vi.fn(), wake })
     engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', persona: 'You write the copy.', capabilities: ['copy'], createdAt: '' })
-    engine.addTeam(team('t1', ['lead', 'a']))
-    engine.sendTeamMessage('t1', 'lead', 'what do you think', 'discussion')
-    expect(talk).toHaveBeenCalledOnce()
-    expect(talk.mock.calls[0]![1]).toBe('a')
+    engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
+    engine.addTeam(team('t1', ['lead', 'a', 'b']))
+    // Naming someone in the text wakes nobody: only a mention does, and it is a structured field.
+    engine.sendTeamMessage('t1', 'lead', '@a what do you think', 'discussion')
+    expect(wake).not.toHaveBeenCalled()
+    expect(engine.inbox('a')).toEqual([])
+    engine.sendTeamMessage('t1', 'lead', 'what do you think', 'discussion', { mentions: ['a'] })
+    expect(wake).toHaveBeenCalledOnce()
+    expect(wake).toHaveBeenCalledWith('a')
     expect(engine.tasks('t1')).toEqual([])
-    // The lead is the main Session, so a reply does not start a superagent Session for it.
-    engine.sendTeamMessage('t1', 'a', 'back', 'discussion')
-    expect(talk).toHaveBeenCalledOnce()
-    engine.updateSuperagent('a', { disabled: { at: '2026-09-23T00:00:00.000Z', by: 'lead' } })
-    engine.sendTeamMessage('t1', 'lead', 'still there', 'discussion')
-    expect(talk).toHaveBeenCalledOnce()
+    expect(engine.inbox('a').map(item => item.botId)).toEqual(['a'])
+    // The lead is the main Session, so a mention of it wakes no superagent Session either.
+    engine.sendTeamMessage('t1', 'a', 'back', 'discussion', { mentions: ['lead'] })
+    expect(wake).toHaveBeenCalledTimes(2)
+    expect(wake).toHaveBeenLastCalledWith('lead')
+    engine.updateSuperagent('b', { disabled: { at: '2026-09-23T00:00:00.000Z', by: 'lead' } })
+    expect(() => engine.sendTeamMessage('t1', 'lead', 'still there', 'discussion', { mentions: ['b'] })).toThrow(UserError)
+    expect(wake).toHaveBeenCalledTimes(2)
+  })
+  it('rejects a mention of a non-member, of the sender, or of more than five members', () => {
+    const { engine } = harness()
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
+    engine.addTeam(team('t1', ['lead', 'a']))
+    expect(() => engine.sendTeamMessage('t1', 'lead', 'hi', 'discussion', { mentions: ['zed'] })).toThrow(UserError)
+    expect(() => engine.sendTeamMessage('t1', 'lead', 'hi', 'discussion', { mentions: ['lead'] })).toThrow(UserError)
+    expect(() => engine.sendTeamMessage('t1', 'lead', 'hi', 'discussion', { mentions: ['a', 'a', 'a', 'a', 'a', 'a'] })).not.toThrow()
+    expect(() => engine.sendTeamMessage('t1', 'lead', 'hi', 'discussion', { mentions: ['a', 'lead'] })).toThrow(UserError)
+  })
+  it('gathers mentions from several groups into one batch, with each group\'s context', () => {
+    const { engine } = harness()
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
+    engine.addTeam(team('t1', ['lead', 'a']))
+    engine.addTeam({ ...team('t2', ['lead', 'a']), name: 'Second' })
+    engine.sendTeamMessage('t1', 'lead', 'first', 'discussion', { mentions: ['a'] })
+    engine.sendTeamMessage('t2', 'lead', 'second', 'discussion', { mentions: ['a'] })
+    const batch = engine.takeBatch('a')!
+    expect(batch.teams.map(group => group.teamId)).toEqual(['t1', 't2'])
+    expect(batch.teams.map(group => group.mentions.map(message => message.text))).toEqual([['first'], ['second']])
+    expect(engine.inbox('a', 'pending')).toHaveLength(2)
+    engine.deliverBatch('a', batch)
+    expect(engine.inbox('a', 'pending')).toEqual([])
+    expect(engine.inbox('a', 'delivered')).toHaveLength(2)
+    expect(engine.takeBatch('a')).toBeUndefined()
+  })
+  it('pauses a group whose bots mention each other too often, and resumes when the person speaks', () => {
+    const wake = vi.fn()
+    const { engine } = harness({ start: vi.fn(), deliver: vi.fn(), stop: vi.fn(), wake })
+    engine.ensureHuman()
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
+    engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
+    engine.addTeam(team('t1', ['lead', 'a', 'b']))
+    for (let index = 0; index < TEAM_HOP_LIMIT; index += 1) engine.sendTeamMessage('t1', 'a', `line ${index}`, 'discussion', { mentions: ['b'] })
+    expect(engine.team('t1')?.paused?.reason).toBe('hops')
+    expect(engine.messages('t1').at(-1)?.kind).toBe('notice')
+    const before = wake.mock.calls.length
+    engine.sendTeamMessage('t1', 'b', 'still talking', 'discussion', { mentions: ['a'] })
+    expect(wake.mock.calls.length).toBe(before)
+    engine.sendTeamMessage('t1', HUMAN_ID, 'carry on', 'discussion', { mentions: ['a'] })
+    expect(engine.team('t1')?.paused).toBeUndefined()
+    expect(engine.team('t1')?.hops).toBe(0)
+    expect(wake).toHaveBeenLastCalledWith('a')
+  })
+  it('needs a lead in a group and at most six bots, and adds the person to every team', () => {
+    const { engine } = harness()
+    engine.ensureHuman()
+    // A group of the person alone has no lead in it, so it is refused for that rather than for a missing member.
+    expect(() => engine.addTeam(team('t1', [HUMAN_ID]))).toThrow(UserError)
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) engine.addSuperagent({ id, name: id, role: 'specialist', createdAt: '' })
+    expect(() => engine.addTeam(team('big', ['lead', 'a', 'b', 'c', 'd', 'e', 'f']))).toThrow(UserError)
+    const created = engine.addTeam(team('t1', ['lead', 'a']))
+    expect(created.memberIds).toContain(HUMAN_ID)
+    expect(engine.isHuman(HUMAN_ID)).toBe(true)
   })
 
-  it('delegates concrete work to a worker under a team mandate', () => {
-    const { repo, engine, executor } = harness()
+  it('holds every bot in the standing all-hands group, so the lead dispatches to any of them', () => {
+    const { engine, runner } = harness()
+    engine.ensureHuman()
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    // The group appeared with the first bot, and holds it and the person.
+    expect(engine.team(ALL_HANDS_ID)).toMatchObject({ kind: 'group', leadId: 'lead' })
+    expect(engine.team(ALL_HANDS_ID)?.memberIds).toEqual(['lead', HUMAN_ID])
+    // A specialist registered later joins it, so the lead needs no group-building step to reach it.
+    engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
+    expect(engine.team(ALL_HANDS_ID)?.memberIds).toEqual(['lead', HUMAN_ID, 'a'])
+    engine.proposeTeam(ALL_HANDS_ID, [{ assigneeId: 'a', text: 'do A' }])
+    engine.dispatchTeam(ALL_HANDS_ID)
+    expect((runner.start as ReturnType<typeof vi.fn>).mock.calls.map(call => call[1].assigneeId)).toEqual(['a'])
+  })
+
+  it('leads the all-hands group with the deployment\'s own lead, the main Session', () => {
+    const { engine } = harness()
+    engine.ensureHuman()
+    engine.addSuperagent({ id: 'chief', name: 'Chief', role: 'lead', createdAt: '' })
+    // The main Session is registered as a bot of the team, so it leads the group it dispatches in.
+    engine.ensureLead('orchestrator-1', '/state')
+    engine.ensureAllHands()
+    expect(engine.team(ALL_HANDS_ID)?.leadId).toBe('orchestrator-1')
+    expect(engine.team(ALL_HANDS_ID)?.memberIds).toContain('chief')
+    expect(engine.superagent('orchestrator-1')?.role).toBe('lead')
+  })
+
+  it('keeps a closed all-hands group closed, and holds more bots than a group people build', () => {
+    const { engine } = harness()
+    engine.ensureHuman()
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) engine.addSuperagent({ id, name: id, role: 'specialist', createdAt: '' })
+    // The standing group holds every bot, past the limit a group people build has.
+    expect(engine.team(ALL_HANDS_ID)?.memberIds).toHaveLength(8)
+    // A closed group is not reopened by a bot: only the person reopens it, by speaking in it.
+    engine.closeTeam(ALL_HANDS_ID, 'lead', 'round done')
+    engine.addSuperagent({ id: 'g', name: 'G', role: 'specialist', createdAt: '' })
+    expect(engine.team(ALL_HANDS_ID)?.closed).toBeDefined()
+    expect(engine.team(ALL_HANDS_ID)?.memberIds).toContain('g')
+  })
+
+  it('delegates concrete work to a worker under a team mandate', () => {    const { repo, engine, executor } = harness()
     engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a']))
@@ -222,4 +331,35 @@ describe('the team of superagents', () => {
     engine.reportTeamTask(a.id, { state: 'done', summary: 'A done' })
     expect(() => engine.delegateTeamWork('t1', a.id, 'again', 'again')).toThrow(UserError)
   })
+})
+
+it('adds the person to a team created before it existed, so an older group can still be spoken to', () => {
+  const { engine } = harness()
+  engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+  engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
+  // A team from a build before the person was a member.
+  engine.addTeam({ id: 'old', name: 'Old', kind: 'group', memberIds: ['lead', 'a'], leadId: 'lead', createdAt: '' })
+  expect(engine.team('old')?.memberIds).not.toContain(HUMAN_ID)
+  engine.ensureHuman()
+  expect(engine.team('old')?.memberIds).toContain(HUMAN_ID)
+  expect(() => engine.sendTeamMessage('old', HUMAN_ID, 'still here?', 'discussion')).not.toThrow()
+})
+
+it('treats a close as the end of a round: the person speaking again starts the next one', () => {
+  const { engine } = harness()
+  engine.ensureHuman()
+  engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+  engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
+  engine.addTeam(team('t1', ['lead', 'a']))
+  engine.closeTeam('t1', 'lead', '定：这一轮结束')
+  expect(engine.team('t1')?.closed).toBeDefined()
+  // A bot cannot reopen it: a close still stops the members from starting work.
+  expect(() => engine.sendTeamMessage('t1', 'a', 'one more thing', 'discussion')).toThrow(UserError)
+  // The person can: the same group goes on, with its history.
+  const before = engine.messages('t1').length
+  engine.sendTeamMessage('t1', HUMAN_ID, '还有一件事', 'discussion', { mentions: ['a'] })
+  expect(engine.team('t1')?.closed).toBeUndefined()
+  expect(engine.messages('t1').length).toBeGreaterThan(before)
+  expect(engine.messages('t1').at(-1)?.text).toBe('还有一件事')
+  expect(engine.inbox('a', 'pending')).toHaveLength(1)
 })

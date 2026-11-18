@@ -42,8 +42,8 @@ export class Setup {
   }
   configured(): boolean { return this.resolved !== undefined }
   /** Resolve deployment accounts and apply the worker environment, recording `SetupError` failures in `problem`/`feishuProblem` and rethrowing unexpected errors. */
-  async run(settings: Settings): Promise<boolean> {
-    try { this.resolved = await this.resolve(settings); return true }
+  async run(settings: Settings, feishuClis: readonly string[] = []): Promise<boolean> {
+    try { this.resolved = await this.resolve(settings, feishuClis); return true }
     catch (error) {
       if (!(error instanceof SetupError)) throw error
       this.problem = error.problem
@@ -73,16 +73,21 @@ export class Setup {
     const { context, machine, lifetime } = this.host
     return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime)
   }
-  private async resolve(settings: Settings): Promise<Deployment> {
+  private async resolve(settings: Settings, feishuClis: readonly string[] = []): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
     const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
-    const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
-      if (!(error instanceof SetupError)) throw error
-      this.feishuProblem = error.problem
-      context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
-      return undefined
-    })
+    const named = [settings.sources.feishu?.config, ...feishuClis.map(cli => ({ cli }))]
+    let feishu: Awaited<ReturnType<typeof resolveFeishuBot>>
+    for (const config of named) {
+      feishu = await resolveFeishuBot(machine, config, probe).catch((error: unknown) => {
+        if (!(error instanceof SetupError)) throw error
+        this.feishuProblem = error.problem
+        context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
+        return undefined
+      })
+      if (feishu) break
+    }
     const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error

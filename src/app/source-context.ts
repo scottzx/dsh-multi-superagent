@@ -9,7 +9,7 @@ import type { Outbox } from './outbox.ts'
 import type { Store } from './store.ts'
 
 export interface SourceContextDeps {
-  readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'read'>
+  readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'read' | 'team'>
   readonly outbox: Pick<Outbox, 'send'>
   readonly engine: Pick<EngineForSources, 'bindThread' | 'threadClosed'>
   readonly commands: Commands
@@ -38,6 +38,12 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     commands: deps.commands,
     ready: deps.ready,
     configured: () => deps.configured(),
+    repositories: () => {
+      const own = deps.deployment.repository
+      const bound = store.team.superagents.list().flatMap(superagent =>
+        superagent.role === 'specialist' && !superagent.disabled && superagent.repository?.trim() ? [superagent.repository.trim()] : [])
+      return [...new Set([own, ...bound].filter(Boolean))]
+    },
     get problem() { return [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
     config: <C extends Record<string, unknown>>(id: string) => {
       const instance = deps.sources.instance<C>(id)

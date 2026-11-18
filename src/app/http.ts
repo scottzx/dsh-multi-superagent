@@ -11,7 +11,7 @@ import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, b
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
-import { UserError, type EngineForPeople, type EngineForTeamPanel, type Ticket } from '../core/index.ts'
+import { HUMAN_ID, UserError, type EngineForPeople, type EngineForTeamPanel, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
 import type { Health } from '../sources/host.ts'
@@ -27,7 +27,10 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
-import { superagentList, teamDetail, teamList } from './views/teams.ts'
+import { AGENTS_MD_LIMIT } from './profiles.ts'
+import type { Profiles } from './profiles.ts'
+import { AgentsMdConflict } from './profiles.ts'
+import { superagentList, teamDetail, teamList, teamMessages } from './views/teams.ts'
 
 export interface HttpHost {
   readonly store: Store
@@ -38,6 +41,8 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople & EngineForTeamPanel
+  /** A superagent's own files: its directory, its AGENTS.md and the skills it can read. */
+  readonly profiles: Profiles
   readonly executor: Pick<DshExecutor, 'activeCount'>
   readonly health: Record<string, Health>
   readonly machine: Machine
@@ -52,6 +57,8 @@ export interface HttpHost {
   links(): LinkTarget
   ticketEnvironment(ticket: Ticket): Variable[]
   checkSetup(): void
+  /** Restart so a specialist's new Feishu CLI is resolved. GitHub repositories are read on the next poll and need no restart. */
+  restart(): void
   requestPass(): void
   models(): Promise<ModelCatalog>
 }
@@ -59,7 +66,7 @@ export interface HttpHost {
  * Represents a client-facing 400 or 404 error raised during management route parsing or lookup.
  * Route handlers throw it when request bodies are malformed or target records are missing, and registerHttp serializes its status and message in the HTTP response.
  */
-class RouteError extends Error { constructor(readonly status: 400 | 404, message: string) { super(message) } }
+class RouteError extends Error { constructor(readonly status: 400 | 404 | 409, message: string) { super(message) } }
 async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<unknown> {
   let size = 0; const chunks: Buffer[] = []
   for await (const chunk of req) {
@@ -99,7 +106,7 @@ function setupView(runtime: HttpHost) {
   const resolved = runtime.configured() ? runtime.deployment : undefined
   return {
     machine: machineView(runtime.machine), problem: runtime.setupProblem ?? null, feishuProblem: runtime.feishuProblem ?? null,
-    accounts: resolved ? { repository: resolved.repository, agent: resolved.github.login, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
+    accounts: resolved?.github ? { repository: resolved.repository, agent: resolved.github.login, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
   }
 }
 /** Build the `/orchestrator/api/state` response consumed by the management panel and `scripts/dsh-superagent status` (`docs/006-deployment.md`). */
@@ -208,35 +215,86 @@ function routes(runtime: HttpHost): Routes {
       return { closed: true }
     },
     'POST teams/:id/message': async ({ params, body }) => {
-      const { text } = z.object({ text: z.string().trim().min(1).max(4000) }).parse(await body())
+      const args = z.object({ text: z.string().trim().min(1).max(4000), at: z.array(z.string().trim().min(1).max(200)).max(5).optional(),
+        reply_to: z.string().trim().min(1).max(200).optional() }).parse(await body())
       const team = runtime.engine.team(params.id)
       if (!team) throw new RouteError(404, 'Team not found')
-      // A person writes as the lead, and only into a direct conversation, so a group is not a second orchestrator inbox.
-      if (team.kind !== 'direct') throw new RouteError(400, 'A message from a person goes to a direct conversation')
-      if (!team.leadId) throw new RouteError(400, 'This conversation has no lead to write as')
-      const message = runtime.engine.sendTeamMessage(params.id, team.leadId, text, 'discussion')
-      return { message_id: message.id }
+      // A person speaks as itself in any conversation, group or direct. Only the superagents in `at` are woken, and speaking
+      // resumes a group that paused itself.
+      const message = runtime.engine.sendTeamMessage(params.id, HUMAN_ID, args.text, 'discussion',
+        { ...args.at ? { mentions: args.at } : {}, ...args.reply_to ? { replyTo: args.reply_to } : {} })
+      return { message_id: message.id, woke: message.mentions ?? [] }
+    },
+    'GET teams/:id/messages': ({ params, query }) => {
+      const after = query?.after ?? undefined
+      const limit = query?.limit === undefined ? 200 : Number(query.limit)
+      const view = teamMessages(store, params.id, after, Number.isFinite(limit) && limit > 0 ? Math.min(limit, 500) : 200)
+      if (!view) throw new RouteError(404, 'Team not found')
+      return view
+    },
+    'POST teams/:id/pause': async ({ params, body }) => {
+      const { paused } = z.object({ paused: z.boolean() }).parse(await body())
+      if (paused) runtime.engine.pauseTeam(params.id)
+      else runtime.engine.resumeTeam(params.id)
+      return { paused: runtime.engine.team(params.id)?.paused !== undefined }
+    },
+    'POST teams': async ({ body }) => {
+      const args = z.object({ name: z.string().trim().min(1).max(160), member_ids: z.array(z.string().trim().min(1).max(200)).min(1).max(16),
+        kind: z.enum(['group', 'direct']).optional(), lead_id: z.string().trim().min(1).max(200).optional() }).parse(await body())
+      const kind = args.kind ?? 'group'
+      const team = runtime.engine.addTeam({ id: `team-${Date.now().toString(36)}`, name: args.name, kind, memberIds: args.member_ids,
+        ...args.lead_id ? { leadId: args.lead_id } : {}, createdAt: '' })
+      return { team_id: team.id }
     },
     'GET superagents': () => superagentList(store),
+    'GET superagents/:id/profile': ({ params }) => {
+      const superagent = store.team.superagents.get(params.id)
+      if (!superagent) throw new RouteError(404, 'Superagent not found')
+      return runtime.profiles.read(superagent)
+    },
+    'PUT superagents/:id/agents-md': async ({ params, body }) => {
+      const superagent = store.team.superagents.get(params.id)
+      if (!superagent) throw new RouteError(404, 'Superagent not found')
+      const write = z.object({ content: z.string().max(AGENTS_MD_LIMIT), baseMtime: z.number() }).parse(await body())
+      try { return runtime.profiles.writeAgentsMd(superagent, write) }
+      catch (error) {
+        if (error instanceof AgentsMdConflict) throw new RouteError(409, 'AGENTS.md changed since it was read; reload before saving')
+        throw error
+      }
+    },
+    'GET superagents/:id/skills/:name': ({ params }) => {
+      const superagent = store.team.superagents.get(params.id)
+      if (!superagent) throw new RouteError(404, 'Superagent not found')
+      const skill = runtime.profiles.skill(superagent, params.name)
+      if (!skill) throw new RouteError(404, 'Skill not found')
+      return skill
+    },
     'POST superagents': async ({ body }) => {
       const args = z.object({ id: z.string().trim().min(1).max(200), name: z.string().trim().min(1).max(160),
         capabilities: z.array(z.string().trim().min(1).max(200)).max(16).optional(), persona: z.string().trim().min(1).max(4000).optional(),
-        directory: z.string().trim().min(1).max(1000).optional() }).parse(await body())
+        directory: z.string().trim().min(1).max(1000).optional(), repository: z.string().trim().max(200).optional(),
+        feishuCli: z.string().trim().max(1000).optional() }).parse(await body())
       const superagent = runtime.engine.addSuperagent({ id: args.id, name: args.name, role: 'specialist', createdAt: '',
         ...args.capabilities ? { capabilities: args.capabilities } : {}, ...args.persona ? { persona: args.persona } : {},
-        ...args.directory ? { directory: args.directory } : {} })
+        ...args.directory ? { directory: args.directory } : {}, ...args.repository ? { repository: args.repository } : {},
+        ...args.feishuCli ? { feishuCli: args.feishuCli } : {} })
       return { id: superagent.id }
     },
     'POST superagents/:id': async ({ params, body }) => {
       const args = z.object({ name: z.string().trim().min(1).max(160).optional(),
         capabilities: z.array(z.string().trim().min(1).max(200)).max(16).nullable().optional(),
         persona: z.string().trim().min(1).max(4000).nullable().optional(), directory: z.string().trim().min(1).max(1000).nullable().optional(),
+        repository: z.string().trim().max(200).nullable().optional(), feishuCli: z.string().trim().max(1000).nullable().optional(),
         disabled: z.boolean().optional() }).parse(await body())
+      const before = store.team.superagents.get(params.id)?.feishuCli
       const superagent = runtime.engine.updateSuperagent(params.id, { ...args.name !== undefined ? { name: args.name } : {},
         ...args.capabilities !== undefined ? { capabilities: args.capabilities } : {},
         ...args.persona !== undefined ? { persona: args.persona } : {},
         ...args.directory !== undefined ? { directory: args.directory ?? null } : {},
+        ...args.repository !== undefined ? { repository: args.repository || null } : {},
+        ...args.feishuCli !== undefined ? { feishuCli: args.feishuCli || null } : {},
         ...args.disabled === undefined ? {} : { disabled: args.disabled ? { at: new Date().toISOString(), by: 'panel' } : null } })
+      if (args.feishuCli !== undefined && (args.feishuCli || undefined) !== before) runtime.restart()
       return { id: superagent.id }
     },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),

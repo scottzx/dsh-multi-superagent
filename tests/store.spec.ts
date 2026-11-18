@@ -262,3 +262,28 @@ it('reads `%` and `_` in a key prefix and a search query as written, not as patt
   expect([store.read.search('50%').map(item => item.id), store.read.search('a_b').map(item => item.id)]).toEqual([['p'], ['r']])
   store.close()
 })
+
+it('keeps each mention in a member\'s inbox once, oldest first, and its read cursor per group', () => {
+  const path = join(directory, 'inbox.sqlite')
+  const store = new Store(path)
+  store.team.inbox.save({ botId: 'a', messageId: 'm2', teamId: 't1', at: '2026-09-23T00:02:00Z', state: 'pending' })
+  store.team.inbox.save({ botId: 'a', messageId: 'm1', teamId: 't1', at: '2026-09-23T00:01:00Z', state: 'pending' })
+  // Another member's mention is not in this member's inbox.
+  store.team.inbox.save({ botId: 'b', messageId: 'm1', teamId: 't1', at: '2026-09-23T00:01:00Z', state: 'pending' })
+  expect(store.team.inbox.list('a').map(item => item.messageId)).toEqual(['m1', 'm2'])
+  // Delivering a batch replaces the item rather than adding a second one.
+  store.team.inbox.save({ botId: 'a', messageId: 'm1', teamId: 't1', at: '2026-09-23T00:01:00Z', state: 'delivered', batchId: 'b1' })
+  expect(store.team.inbox.list('a')).toHaveLength(2)
+  expect(store.team.inbox.list('a', 'pending').map(item => item.messageId)).toEqual(['m2'])
+  expect(store.team.inbox.list('a', 'delivered')[0]).toMatchObject({ batchId: 'b1' })
+  store.team.cursors.save({ teamId: 't1', memberId: 'a', readAt: '2026-09-23T00:02:00Z' })
+  store.team.cursors.save({ teamId: 't2', memberId: 'a', readAt: '2026-09-23T00:03:00Z' })
+  expect(store.team.cursors.get('t1', 'a')?.readAt).toBe('2026-09-23T00:02:00Z')
+  expect(store.team.cursors.list('a')).toHaveLength(2)
+  store.close()
+  // The rows survive a reopen, which the batch assembly depends on.
+  const again = new Store(path)
+  expect(again.team.inbox.list('a')).toHaveLength(2)
+  expect(again.team.cursors.get('t2', 'a')?.readAt).toBe('2026-09-23T00:03:00Z')
+  again.close()
+})

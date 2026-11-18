@@ -63,8 +63,8 @@ export function apply(ctx: ClientContext): void {
   // A lower priority sorts first and replaces it. A throw still falls back to that list.
   ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register({ name: 'sidebar.workspaces', priority: -1_000_000 },
     (props: { wide?: boolean }) => <RosterBoundary>
-      <PanelProvider t={t} openSession={id => openKnownSession(ctx.sessions, id as SessionId,
-        target => { ctx.uiWorkspace.openSession(target) }, new AbortController().signal)}>
+      <PanelProvider t={t} openSession={async id => { await openKnownSession(ctx.sessions, id as SessionId,
+        target => { ctx.uiWorkspace.openSession(target) }, new AbortController().signal) }}>
         <style>{rosterStyles}</style>
         <Roster wide={props.wide !== false} sessions={ctx.sessions} status={sessionStatus(ctx)} openTeam={() => selectPanel(ctx)} />
       </PanelProvider>

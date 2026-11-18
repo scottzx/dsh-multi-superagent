@@ -384,6 +384,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
 | `src/client/overview.tsx` | The overview |
 | `src/client/team.tsx` | The Team tab: the list of team conversations, one team's tasks and messages, and closing a round |
+| `src/client/roster.tsx`, `roster.css` | The specialist roster that takes the sidebar's session list: who is on the team, each one's status, the group chats, and the first-letter avatars |
+| `src/client/presence.ts` | The status a roster row shows (idle, asking, working, done) and the local memory of which finished rows a person has not opened yet |
+| `src/client/chat.tsx`, `chat.css` | The team chat: bubbles and cards, the mention picker that turns a choice into the structured `at` list, each superagent's live status, and the composer |
+| `src/app/profiles.ts` | A superagent's own files: the directory its Session runs in, the `AGENTS.md` DSH injects from it (read, written, and guarded by mtime), and the skills it can read |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
 | `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
@@ -437,6 +441,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
 | `tests/migration.spec.ts` | The schema 11 record migration: every stored record in its current shape, and the refusal of older schemas |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
+| `tests/profiles.spec.ts` | A superagent's per-member directory, its `AGENTS.md` round trip and conflict guard, the size limit, and the skills it can read from each source |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |

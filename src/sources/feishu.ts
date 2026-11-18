@@ -32,7 +32,7 @@ export const feishuKind: SourceKind<FeishuConfig> = {
   kind: SOURCE,
   refreshLabels: (host, signal) => refreshChatNames(sourceContext(host, feishuKind), signal),
   title: { zh: '飞书', en: 'Feishu' },
-  description: { zh: '接收下列群和私聊中发给机器人的消息，补收群历史并轮询订阅的线程。', en: 'Receives messages to the bot in these chats and direct messages, recovers chat history and polls subscribed Threads.' },
+  description: { zh: '可选。接收发给机器人的消息；机器人也可配在专业 superagent 上。', en: 'Optional. Receives messages to the bot; a specialist may name its own.' },
   schema: FeishuConfigSchema,
   fields: [
     { key: 'cli', type: 'text', label: { zh: '机器人的 lark-cli', en: 'Bot lark-cli' },

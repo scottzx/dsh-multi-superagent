@@ -51,7 +51,8 @@ export const threadSummary = (fields: Partial<ThreadRow> = {}): ThreadRow => ({
 })
 /** A team summary for the panel's team tab. */
 export const TEAM_SUMMARY = { id: 'team1', name: '文案团队', kind: 'group' as const, leadId: 'lead',
-  members: [{ id: 'lead', name: 'Lead', role: 'lead' }, { id: 'writer', name: 'Writer', role: 'specialist', directory: '/Users/scott/projects/copy' }],
+  members: [{ id: 'lead', name: 'Lead', role: 'lead' }, { id: 'writer', name: 'Writer', role: 'specialist', directory: '/Users/scott/projects/copy' },
+    { id: 'a', name: 'Researcher', role: 'specialist' }],
   counts: { proposed: 1, waiting: 1, working: 1, done: 0, failed: 0 } }
 /** The team list the panel's team tab reads. */
 export const teamListView = (): ApiResponse<'GET teams'> => ({ teams: [TEAM_SUMMARY] })
@@ -66,7 +67,9 @@ export const teamDetailView = (id = 'team1'): ApiResponse<'GET teams/:id'> => ({
   messages: [
     { id: 'm1', from: 'lead', fromName: 'Lead', text: '分一下工', at: '2026-09-23T00:00:00Z', kind: 'task' as const, taskId: 'task1' },
     { id: 'm2', from: 'writer', fromName: 'Writer', text: '已开工', at: '2026-09-23T00:01:00Z', kind: 'report' as const, taskId: 'task1' },
-  ] })
+  ],
+  statuses: [{ id: 'lead', state: 'idle' as const, queued: 0 }, { id: 'writer', state: 'working' as const, queued: 0 },
+    { id: 'a', state: 'queued' as const, queued: 2 }] })
 type TriggerFields = Partial<Omit<TriggerRow, 'disposition' | 'actions'>> & { disposition?: Partial<TriggerRow['disposition']> }
 /** Build a trigger row on the default thread and compute `actions.requeue` using the host's eligibility rules. */
 export function trigger(id: string, at: string, { disposition, ...fields }: TriggerFields = {}): TriggerRow {
@@ -111,6 +114,8 @@ export interface PanelServer {
   threads: ThreadRow[]
   teams: ApiResponse<'GET teams'>; teamDetails: Record<string, ApiResponse<'GET teams/:id'>>
   superagents: ApiResponse<'GET superagents'>
+  /** A superagent's own files, keyed by its id, so a profile read and its save see the same one. */
+  profiles: Record<string, ApiResponse<'GET superagents/:id/profile'>>
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
   requests: { path: string; method: string; body?: unknown }[]
@@ -267,7 +272,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
-    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [], profiles: {},
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -371,13 +376,33 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
       closed: { at: '2026-09-23T00:02:00Z', by: detail.team.leadId ?? '', summary: body.summary } } : team) }
     return { closed: true }
   } },
-  'POST teams/:id/message': { body: true, answer: ({ params }) => server.teamDetails[params.id]
-    ? { message_id: `m-${params.id}` } : refuse(404, 'Team not found') },
+  'POST teams/:id/message': { body: true, answer: ({ params, body }) => server.teamDetails[params.id]
+    ? { message_id: `m-${params.id}`, woke: body.at ?? [] } : refuse(404, 'Team not found') },
+  'GET teams/:id/messages': { answer: ({ params }) => server.teamDetails[params.id]
+    ? { messages: server.teamDetails[params.id]!.messages } : refuse(404, 'Team not found') },
+  'POST teams/:id/pause': { body: true, answer: ({ params, body }) => server.teamDetails[params.id]
+    ? { paused: body.paused } : refuse(404, 'Team not found') },
+  'POST teams': { body: true, answer: ({ body }) => ({ team_id: `team-${server.teams.teams.length + 1}` }) },
   'GET superagents': { answer: () => server.superagents },
+  'GET superagents/:id/profile': { answer: ({ params }) => {
+    const member = server.superagents.superagents.find(row => row.id === params.id)
+    if (!member) return refuse(404, 'Superagent not found')
+    return server.profiles[params.id] ?? { id: params.id, name: member.name, directory: `/state/superagents/${params.id}`,
+      agentsMd: { path: `/state/superagents/${params.id}/AGENTS.md`, content: `# ${member.name}`, mtime: 1 }, skills: [] }
+  } },
+  'PUT superagents/:id/agents-md': { body: true, answer: ({ params, body }) => {
+    const current = server.profiles[params.id] ?? { id: params.id, name: params.id, directory: `/state/superagents/${params.id}`,
+      agentsMd: { path: `/state/superagents/${params.id}/AGENTS.md`, content: '', mtime: 1 }, skills: [] }
+    if (body.baseMtime !== (current.agentsMd?.mtime ?? 0)) return refuse(409, 'AGENTS.md changed since it was read')
+    server.profiles[params.id] = { ...current, agentsMd: { path: current.agentsMd?.path ?? '', content: body.content, mtime: (current.agentsMd?.mtime ?? 0) + 1 } }
+    return server.profiles[params.id]!
+  } },
+  'GET superagents/:id/skills/:name': { answer: ({ params }) => ({ name: params.name, content: `# ${params.name}` }) },
   'POST superagents': { body: true, answer: ({ body }) => {
     server.superagents = { superagents: [...server.superagents.superagents, { id: body.id, name: body.name, role: 'specialist',
       ...body.capabilities ? { capabilities: body.capabilities } : {}, ...body.persona ? { persona: body.persona } : {},
-      ...body.directory ? { directory: body.directory } : {} }] }
+      ...body.directory ? { directory: body.directory } : {}, ...body.repository ? { repository: body.repository } : {},
+      ...body.feishuCli ? { feishuCli: body.feishuCli } : {} }] }
     return { id: body.id }
   } },
   'POST superagents/:id': { body: true, answer: ({ params, body }) => {

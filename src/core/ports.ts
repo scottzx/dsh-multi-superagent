@@ -1,6 +1,6 @@
 /** Ports the core depends on. Sources, policies, assessors, executors, and channels are project-specific. */
-import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Superagent, Strength, Team, TeamMessage, TeamTask, Thread,
-  Ticket, TicketEndBy, TicketOutcome, Trigger } from './model.ts'
+import type { Assignment, ChannelRef, Decision, DecisionKind, InboxItem, Mandate, MandateBasis, Superagent, Strength, Team, TeamCursor,
+  TeamMessage, TeamTask, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger } from './model.ts'
 import type { Reason } from './reasons.ts'
 
 /** Gate admission result: either inadmissible with a reason code, or admissible with strength and MandateBasis. */
@@ -80,10 +80,11 @@ export interface SuperagentRunner {
   /** End a superagent turn's work, such as cancelling its Session's turn; called after the task has already ended in the domain. */
   stop(team: Team, task: TeamTask, reason: string): void
   /**
-   * Deliver a team's message to a member who has no working task, so talk does not wait for a dispatched task. Optional: a
-   * runner that has none leaves an idle member's messages in the team record, which its next turn reads.
+   * Wake a member's Session because mentions of it are waiting in its inbox: the runner reads the pending items, delivers
+   * them as one batch, and reports back through `Engine.superagentWoken`. Optional: a runner without it leaves mentions in
+   * the inbox until the member's next task turn reads them.
    */
-  talk?(team: Team, memberId: string, message: TeamMessage): void
+  wake?(botId: string): void
 }
 
 /** A message for a Channel; `ticketId` names the Ticket it is for, when there is one. */
@@ -121,6 +122,8 @@ export interface DomainEvents {
   'superagent.added': { superagentId: string }
   /** A team conversation was created. */
   'team.created': { teamId: string }
+  /** A team's membership grew: the standing all-hands group took in new bots. */
+  'team.members.added': { teamId: string; memberIds: string[] }
   /** A message was recorded on a team. */
   'team.message': { messageId: string; teamId: string }
   /** A team's tasks were proposed, before any of them is dispatched. */
@@ -135,6 +138,12 @@ export interface DomainEvents {
   'team.closed': { teamId: string; by: string }
   /** A superagent's persona, skills, directory or disabled state changed. */
   'superagent.updated': { superagentId: string }
+  /** Mentions of a member were handed to its Session as one batch, so its inbox items are `delivered`. */
+  'team.inbox.delivered': { botId: string; batchId: string; messageIds: string[] }
+  /** A group paused itself because its mention chain reached the hop limit. */
+  'team.paused': { teamId: string; reason: 'hops' | 'manual' }
+  /** A paused group was resumed, by a person speaking in it or by hand. */
+  'team.resumed': { teamId: string }
 }
 export type DomainEvent = { [K in keyof DomainEvents]: { type: K; at: string; data: DomainEvents[K] } }[keyof DomainEvents]
 
@@ -167,11 +176,23 @@ export interface Repositories {
     save(decision: Decision): void
     byThread(key: string): Decision[]
   }
-  /** Superagent identities, team conversations, their messages and their tasks. */
+  /** Superagent identities, team conversations, their messages, tasks, and each member's inbox and read cursors. */
   team: {
     superagents: { get(id: string): Superagent | undefined; save(value: Superagent): void; list(): Superagent[] }
     teams: { get(id: string): Team | undefined; save(value: Team): void; list(): Team[] }
     messages: { get(id: string): TeamMessage | undefined; save(value: TeamMessage): void; list(teamId: string): TeamMessage[] }
     tasks: { get(id: string): TeamTask | undefined; save(value: TeamTask): void; list(teamId: string): TeamTask[] }
+    inbox: {
+      /** The mentions waiting for a bot, oldest first; `delivered` keeps the ones a batch already carried. */
+      list(botId: string, state?: 'pending' | 'delivered'): InboxItem[]
+      /** Save an inbox item; one item per (bot, message), so saving again replaces it. */
+      save(value: InboxItem): void
+    }
+    cursors: {
+      get(teamId: string, memberId: string): TeamCursor | undefined
+      save(value: TeamCursor): void
+      /** The cursors of one member across every group it reads. */
+      list(memberId: string): TeamCursor[]
+    }
   }
 }

@@ -51,8 +51,10 @@ export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
 export interface Deployment extends Machine {
+  /** The repository the deployment-level GitHub Source watches, or empty when monitoring is left to specialists or off. */
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  /** The agent GitHub account, absent when GitHub is not configured. Monitoring needs it; a repository alone does not. */
+  github?: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -83,18 +85,24 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
+/**
+ * Verify the agent's GitHub CLI identity, and its push access when a repository is named.
+ * Both may be empty: GitHub monitoring is optional, and a specialist can name its own repository later. A repository
+ * without a CLI cannot be watched, so that is still refused.
+ */
 export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
-  if (!remote) throw new SetupError('repositoryUnset')
+  if (!remote && !accounts.cli) return { ...machine, repository: '' }
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
   try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
   const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
+  // No repository here means monitoring is off at this level. Specialists may still name one each.
+  if (!remote) return { ...machine, repository: '', github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
   // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
   const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
     throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })

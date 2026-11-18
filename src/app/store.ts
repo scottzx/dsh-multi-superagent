@@ -2,8 +2,8 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, type ReplyStatus, type Repositories, type Superagent, type Team,
-  type TeamMessage, type TeamTask, type Thread, type ThreadFact, type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
+import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, type ReplyStatus, type InboxItem, type Repositories, type Superagent, type Team,
+  type TeamCursor, type TeamMessage, type TeamTask, type Thread, type ThreadFact, type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
 import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
@@ -78,6 +78,10 @@ export class Store implements Repositories {
             CREATE TABLE IF NOT EXISTS team (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS team_message (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS team_task (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS team_inbox (bot TEXT NOT NULL, message TEXT NOT NULL, at TEXT NOT NULL, state TEXT NOT NULL,
+              value TEXT NOT NULL, PRIMARY KEY (bot, message));
+            CREATE TABLE IF NOT EXISTS team_cursor (team TEXT NOT NULL, member TEXT NOT NULL, value TEXT NOT NULL,
+              PRIMARY KEY (team, member));
             CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS trigger_thread (thread TEXT NOT NULL, id TEXT NOT NULL, at TEXT NOT NULL, human INTEGER NOT NULL,
               PRIMARY KEY (thread, id));
@@ -270,6 +274,26 @@ export class Store implements Repositories {
       get: (id: string): TeamTask | undefined => { const row = this.db.prepare('SELECT value FROM team_task WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as TeamTask : undefined },
       save: (value: TeamTask): void => { this.db.prepare('INSERT INTO team_task VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(value.id, JSON.stringify(value)) },
       list: (teamId: string): TeamTask[] => this.values('SELECT value FROM team_task WHERE value ->> \'$.teamId\' = ? ORDER BY rowid', teamId),
+    },
+    inbox: {
+      list: (botId: string, state?: 'pending' | 'delivered'): InboxItem[] => state === undefined
+        ? this.values('SELECT value FROM team_inbox WHERE bot = ? ORDER BY at, rowid', botId)
+        : this.values('SELECT value FROM team_inbox WHERE bot = ? AND state = ? ORDER BY at, rowid', botId, state),
+      save: (value: InboxItem): void => {
+        this.db.prepare('INSERT INTO team_inbox VALUES (?,?,?,?,?) ON CONFLICT(bot, message) DO UPDATE SET value=excluded.value, at=excluded.at, state=excluded.state')
+          .run(value.botId, value.messageId, value.at, value.state, JSON.stringify(value))
+      },
+    },
+    cursors: {
+      get: (teamId: string, memberId: string): TeamCursor | undefined => {
+        const row = this.db.prepare('SELECT value FROM team_cursor WHERE team = ? AND member = ?').get(teamId, memberId)
+        return row ? JSON.parse(String(row.value)) as TeamCursor : undefined
+      },
+      save: (value: TeamCursor): void => {
+        this.db.prepare('INSERT INTO team_cursor VALUES (?,?,?) ON CONFLICT(team, member) DO UPDATE SET value=excluded.value')
+          .run(value.teamId, value.memberId, JSON.stringify(value))
+      },
+      list: (memberId: string): TeamCursor[] => this.values('SELECT value FROM team_cursor WHERE member = ? ORDER BY rowid', memberId),
     },
   }
   /** Read-only queries for management views, orchestrator tools, and source polling (see `storeReads`). */

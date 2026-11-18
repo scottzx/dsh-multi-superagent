@@ -1,7 +1,7 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
 import { UserError } from './errors.ts'
 import { isoTime, liveTicket } from './model.ts'
-import type { ChannelRef, Decision, PolicyEffect, Superagent, Team, TeamMessage, TeamMessageKind, TeamTask, ThreadRef, Ticket, Trigger } from './model.ts'
+import type { ChannelRef, Decision, InboxItem, PolicyEffect, Superagent, Team, TeamMessage, TeamMessageKind, TeamTask, ThreadRef, Ticket, Trigger } from './model.ts'
 import type { Candidate, Repositories } from './ports.ts'
 import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
@@ -9,7 +9,7 @@ import { Evals, type Outcome } from './evals.ts'
 import { Intake, type ReceiveResult } from './intake.ts'
 import { Replies, type Reply, type ReplyRequest } from './replies.ts'
 import { Tickets } from './tickets.ts'
-import { Teams, type SuperagentChange } from './team.ts'
+import { Teams, type InboxBatch, type SendOptions, type SuperagentChange } from './team.ts'
 
 export type { EngineOptions } from './part.ts'
 export type { WorkerReport } from './assignments.ts'
@@ -271,10 +271,28 @@ export class Engine {
   tasks(teamId: string): TeamTask[] { return this.teams.tasks(teamId) }
   /** The messages of a team, oldest first. */
   messages(teamId: string): TeamMessage[] { return this.teams.messages(teamId) }
-  /** Record a message on a team and deliver it to a running turn, or as talk when the member is idle. */
-  sendTeamMessage(teamId: string, from: string, text: string, kind: TeamMessageKind, taskId?: string, triggerId?: string): TeamMessage {
-    return this.repo.atomic(() => this.teams.sendMessage(teamId, from, text, kind, taskId, triggerId))
+  /** Record a message on a team and put it in the inbox of every member it mentions, which is what wakes them. */
+  sendTeamMessage(teamId: string, from: string, text: string, kind: TeamMessageKind, options?: SendOptions): TeamMessage {
+    return this.repo.atomic(() => this.teams.sendMessage(teamId, from, text, kind, options))
   }
+  /** The person's identity, created once at startup so every group can include it. */
+  ensureHuman(): Superagent { return this.repo.atomic(() => this.teams.ensureHuman()) }
+  /** The main Session's identity as a bot of the team, so the lead is a member of the groups it dispatches in. */
+  ensureLead(id: string, directory?: string): Superagent { return this.repo.atomic(() => this.teams.ensureLead(id, directory)) }
+  /** The standing all-hands group, which holds every bot, so the lead dispatches to anyone without building a group. */
+  ensureAllHands(): Team | undefined { return this.repo.atomic(() => this.teams.ensureAllHands()) }
+  /** Whether `id` is the person, who runs no Session. */
+  isHuman(id: string): boolean { return this.teams.isHuman(id) }
+  /** A bot's mentions waiting for it, oldest first. */
+  inbox(botId: string, state: 'pending' | 'delivered' = 'pending'): InboxItem[] { return this.teams.inbox(botId, state) }
+  /** Take a bot's waiting mentions as one batch, or undefined when nothing waits. */
+  takeBatch(botId: string): InboxBatch | undefined { return this.teams.takeBatch(botId) }
+  /** Mark a batch's mentions delivered and advance the bot's read cursors. */
+  deliverBatch(botId: string, batch: InboxBatch): void { this.repo.atomic(() => this.teams.deliverBatch(botId, batch)) }
+  /** Pause a group by hand; its messages are still recorded, but its mentions wake nobody. */
+  pauseTeam(teamId: string): Team { return this.repo.atomic(() => this.teams.pause(teamId)) }
+  /** Resume a paused group and clear its mention chain. */
+  resumeTeam(teamId: string): Team { return this.repo.atomic(() => this.teams.resume(teamId)) }
   /** Propose a division for a team: one task per member, each with its text, `after` members and declared outputs. */
   proposeTeam(teamId: string, specs: readonly { assigneeId: string; text: string; after?: string[]; outputs?: string[] }[]): TeamTask[] {
     return this.repo.atomic(() => this.teams.propose(teamId, specs))
@@ -326,14 +344,15 @@ export type EngineForSettings = Pick<Engine, 'policyChanged'>
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
   | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply'>
 /** What the SuperagentRunner reports back to the Engine about superagent turns. */
-export type EngineForSuperagentRunner = Pick<Engine, 'superagentStarted' | 'superagentDelivered' | 'superagentTurnEnded' | 'superagentFailed'>
+export type EngineForSuperagentRunner = Pick<Engine, 'superagentStarted' | 'superagentDelivered' | 'superagentTurnEnded' | 'superagentFailed'
+  | 'takeBatch' | 'deliverBatch' | 'inbox'>
 /** What the lead asks of the Engine, through its team tools: read the team, propose and dispatch a division, close a round. */
 export type EngineForLead = Pick<Engine, 'superagent' | 'superagents' | 'team' | 'openTeams' | 'tasks' | 'messages' | 'sendTeamMessage' | 'proposeTeam'
-  | 'dispatchTeam' | 'closeTeam' | 'delegateTeamWork' | 'addSuperagent' | 'updateSuperagent' | 'addTeam'>
+  | 'dispatchTeam' | 'closeTeam' | 'delegateTeamWork' | 'addSuperagent' | 'updateSuperagent' | 'addTeam' | 'ensureAllHands'>
 /** What a specialist superagent asks of the Engine, through its team tools: its task, the team's talk, and delegation. */
 export type EngineForSpecialist = Pick<Engine, 'tasks' | 'messages' | 'sendTeamMessage' | 'reportTeamTask' | 'delegateTeamWork'>
-/** What the panel asks of the Engine for the team view: read the teams and close a round. */
+/** What the panel asks of the Engine for the team view: read the teams, speak in one, pause it, and close a round. */
 export type EngineForTeamPanel = Pick<Engine, 'openTeams' | 'team' | 'tasks' | 'messages' | 'closeTeam' | 'superagents'
-  | 'addSuperagent' | 'updateSuperagent' | 'sendTeamMessage'>
+  | 'addSuperagent' | 'updateSuperagent' | 'sendTeamMessage' | 'addTeam' | 'pauseTeam' | 'resumeTeam' | 'inbox' | 'ensureAllHands'>
 
 export type { TeamTask }

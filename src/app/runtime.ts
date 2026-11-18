@@ -46,6 +46,7 @@ import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
+import { Profiles } from './profiles.ts'
 import { superagentTools } from './tools/superagent.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
@@ -68,6 +69,8 @@ export class Runtime extends Service implements SourceHost {
   readonly settings: Settings
   readonly executor: DshExecutor
   readonly superagentRunner: SuperagentRunnerImpl
+  /** Each superagent's own files: its directory, its AGENTS.md, and the skills it can read. */
+  readonly profiles: Profiles
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
   readonly engine: Engine
@@ -133,7 +136,9 @@ export class Runtime extends Service implements SourceHost {
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.superagentRunner = new SuperagentRunnerImpl({ context: ctx, get engine() { return runtime.engine }, store, effects, sessions,
-        machine, lifetime: this.lifetime, closing: () => this.closing(), paused: () => this.paused() })
+        machine, masterId, lifetime: this.lifetime, closing: () => this.closing(), paused: () => this.paused() })
+      // A superagent's own files live in the directory its Session runs in, which is where DSH reads AGENTS.md from.
+      this.profiles = new Profiles(machine.stateDir)
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
@@ -141,7 +146,7 @@ export class Runtime extends Service implements SourceHost {
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor, superagent: this.superagentRunner,
-        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome),
+        outbox, leadId: masterId, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome),
         prepareDelegated: (ticket, delegation) => executor.prepareDelegated(ticket, delegation), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
@@ -216,13 +221,23 @@ export class Runtime extends Service implements SourceHost {
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
-    if (!await this.setup.run(this.store.settings())) {
+    const feishuClis = this.store.team.superagents.list().flatMap(superagent => superagent.feishuCli?.trim() ? [superagent.feishuCli.trim()] : [])
+    if (!await this.setup.run(this.store.settings(), feishuClis)) {
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return
     }
     this.sessions.install()
     this.executor.install()
     this.superagentRunner.install()
+    // The person is a member of every team it joins, so it must exist before a team is created or a message is sent.
+    this.engine.ensureHuman()
+    // The main Session is the deployment's lead: a bot identity of its own, so it leads the standing all-hands group and the
+    // mentions that reach it arrive in its own Session.
+    this.engine.ensureLead(this.masterId, this.machine.stateDir)
+    this.engine.ensureAllHands()
+    // A persona registered before AGENTS.md existed is that superagent's brief. Seed it once, so dropping it from the prompt
+    // does not leave an existing superagent without the identity it was given.
+    for (const superagent of this.store.team.superagents.list()) if (superagent.role !== 'human') this.profiles.read(superagent)
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
@@ -236,10 +251,11 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+      profiles: runtime.profiles,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
-      checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
+      checkSetup: () => { setup.check() }, restart: () => { setup.restart() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
   }
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
