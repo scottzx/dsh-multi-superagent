@@ -34,7 +34,12 @@ function Bubble({ message, members, onReply }: { message: MessageRow; members: S
   const { t } = usePanel()
   const own = message.from === HUMAN
   const member = members.find(item => item.id === message.from)
-  if (message.kind === 'notice') return <li className="dt-chat-notice"><span>{message.text}</span></li>
+  if (message.kind === 'notice') {
+    if (message.from === 'bob') return <li className="dt-chat-notice dt-chat-notice-bob">
+      <Tag tone="info">{t('bobHandoffLabel')}</Tag><span>{message.text}</span>
+    </li>
+    return <li className="dt-chat-notice"><span>{message.text}</span></li>
+  }
   // A task, a report and a closing decision are cards rather than talk: they carry something the group must see.
   if (message.kind === 'task' || message.kind === 'report' || message.kind === 'decision') {
     return <li className={`dt-chat-card dt-chat-card-${message.kind}`}>
@@ -113,7 +118,7 @@ function Composer({ teamId, members, replying, onSent, onCancelReply }: {
       {candidates.length ? candidates.map(member => <button key={member.id} type="button" role="option" aria-selected={false}
         className="dt-chat-picker-row" onClick={() => { setAt([...at, member.id]); setFilter(''); setPicking(false); field.current?.focus() }}>
         <Avatar member={member} /><span>{member.name}</span>
-        {member.role === 'lead' && <Tag tone="quiet">{t('rosterLead')}</Tag>}
+        {member.builtin && <Tag tone="quiet">{t('rosterBuiltin')}</Tag>}
       </button>) : <p className="dt-hint">{t('chatNoCandidates')}</p>}
     </div>}
     <div className="dt-chat-input-row">
@@ -167,7 +172,7 @@ export function TeamChat({ team, detail, onReload }: {
         {team.paused ? t('chatResume') : t('chatPause')}
       </Button>
     </div>}>
-    <StatusStrip members={team.members} statuses={statuses} onProfile={setProfile} />
+    <StatusStrip members={team.members} statuses={statuses} ownerId={team.leadId} onProfile={setProfile} />
     {profile && <ProfileForm member={profile} onClose={() => setProfile(undefined)} />}
     {team.paused && <p className="dt-hint">{team.paused.reason === 'hops' ? t('chatPausedHops') : t('chatPausedManual')}</p>}
     <ul className="dt-chat" onScroll={event => {
@@ -231,13 +236,15 @@ function ProfileForm({ member, onClose }: { member: SuperagentRow; onClose: () =
 }
 
 /** The chat's status strip, which is also the way into each superagent's profile. */
-export function StatusStrip({ members, statuses, onProfile }: {
-  members: SuperagentRow[]; statuses: MemberStatusRow[]; onProfile: (member: SuperagentRow) => void
+export function StatusStrip({ members, statuses, ownerId, onProfile }: {
+  members: SuperagentRow[]; statuses: MemberStatusRow[]; ownerId?: string; onProfile: (member: SuperagentRow) => void
 }) {
+  const { t } = usePanel()
   return <div className="dt-chat-statuses">{members.filter(member => member.role !== 'human').map(member =>
     <button key={member.id} type="button" className="dt-chat-status-item dt-chat-status-button" onClick={() => onProfile(member)}>
       <Avatar member={member} />
       <span className="dt-chat-status-name">{member.name}</span>
+      {ownerId === member.id && <Tag tone="quiet">{t('rosterOwner')}</Tag>}
       <StatusPill status={statuses.find(row => row.id === member.id)} />
     </button>)}</div>
 }

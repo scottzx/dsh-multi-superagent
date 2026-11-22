@@ -17,14 +17,6 @@ function harness(superagent?: SuperagentRunner) {
   return { repo, engine, executor, runner }
 }
 
-/** The identity a lead tool writes as: the session when it is a member, otherwise the team's lead. */
-function voice(teamId: string, sessionId: string, engine: { team(id: string): Team | undefined }): string {
-  const found = engine.team(teamId)
-  if (!found) return sessionId
-  if (found.memberIds.includes(sessionId)) return sessionId
-  return found.leadId && found.memberIds.includes(found.leadId) ? found.leadId : sessionId
-}
-
 function team(id: string, memberIds: string[] = ['lead'], kind: Team['kind'] = 'group'): Team {
   return { id, name: id, kind, memberIds, ...kind === 'group' ? { leadId: memberIds[0] } : {}, createdAt: '2026-09-23T00:00:00.000Z' }
 }
@@ -32,7 +24,7 @@ function team(id: string, memberIds: string[] = ['lead'], kind: Team['kind'] = '
 describe('the team of superagents', () => {
   it('registers superagents and teams, and refuses duplicates and unknown members', () => {
     const { engine } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     expect(engine.superagent('a')?.name).toBe('A')
     expect(engine.addTeam(team('t1', ['lead', 'a'])).id).toBe('t1')
@@ -47,7 +39,7 @@ describe('the team of superagents', () => {
 
   it('binds a superagent to its own project directory and falls back to the state directory', () => {
     const { engine } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', directory: '/srv/copy', createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     expect(engine.superagent('a')?.directory).toBe('/srv/copy')
@@ -61,7 +53,7 @@ describe('the team of superagents', () => {
 
   it('dispatches a division, starts ready tasks, and marks the rest waiting', () => {
     const { engine, runner } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a', 'b']))
@@ -79,7 +71,7 @@ describe('the team of superagents', () => {
 
   it('advances a waiting task once its dependency reports done', () => {
     const { engine, runner } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a', 'b']))
@@ -97,7 +89,7 @@ describe('the team of superagents', () => {
 
   it('fails a waiting task whose dependency failed', () => {
     const { engine } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a', 'b']))
@@ -109,7 +101,7 @@ describe('the team of superagents', () => {
 
   it('fails a dependency cycle at dispatch rather than waiting forever', () => {
     const { engine } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a', 'b']))
@@ -127,7 +119,7 @@ describe('the team of superagents', () => {
 
   it('records team messages, and mentions reach a running turn while unmentioned talk does not', () => {
     const { engine, runner } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a', 'b']))
@@ -144,26 +136,32 @@ describe('the team of superagents', () => {
     expect(() => engine.sendTeamMessage('t1', 'ghost', 'nope', 'discussion')).toThrow(UserError)
   })
 
-  it('lets the main session write as the team lead, and omits an absent reason from a dispatch', () => {
+  it('lets only the owner speak, add and remove members, and hands a request to the owner without joining', () => {
     const { engine } = harness()
-    engine.addSuperagent({ id: 'chief', name: 'Chief', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'chief', name: 'Chief', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
+    engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['chief', 'a']))
-    // The orchestrator session id is not a member. The tool records the line as the team's lead.
-    const from = voice('t1', 'orchestrator-14cd', engine)
-    expect(from).toBe('chief')
-    engine.sendTeamMessage('t1', from, 'hi', 'discussion')
+    expect(() => engine.sendTeamMessage('t1', 'a', 'hi', 'discussion')).toThrow(UserError)
+    expect(() => engine.sendTeamMessage('t1', 'bob', 'hi', 'discussion')).toThrow(UserError)
+    engine.sendTeamMessage('t1', 'chief', 'hi', 'discussion')
     expect(engine.messages('t1').at(-1)).toMatchObject({ from: 'chief', text: 'hi' })
-    engine.proposeTeam('t1', [{ assigneeId: 'a', text: 'do A' }])
-    const dispatched = engine.dispatchTeam('t1').map(task => ({ task_id: task.id, assignee_id: task.assigneeId, state: task.state,
-      ...task.reason ? { reason: task.reason } : {} }))
-    expect(JSON.stringify(dispatched)).not.toContain('undefined')
-    expect(dispatched[0]).toEqual({ task_id: expect.any(String), assignee_id: 'a', state: 'working' })
+    expect(() => engine.addTeamMember('t1', 'a', 'b')).toThrow(UserError)
+    expect(engine.addTeamMember('t1', 'chief', 'b').memberIds).toContain('b')
+    expect(() => engine.removeTeamMember('t1', 'chief', 'chief')).toThrow(UserError)
+    expect(engine.removeTeamMember('t1', 'chief', 'a').memberIds).not.toContain('a')
+    expect(() => engine.addTeamMember(ALL_HANDS_ID, 'chief', 'b')).toThrow(UserError)
+    engine.setTeamOwner('t1', 'b')
+    expect(() => engine.sendTeamMessage('t1', 'chief', 'still mine', 'discussion')).toThrow(UserError)
+    const handed = engine.handOffTeam('t1', 'please revise the resume')
+    expect(handed.mentions).toEqual(['b'])
+    expect(engine.inbox('b', 'pending').map(item => item.messageId)).toEqual([handed.id])
+    expect(engine.team('t1')?.memberIds).not.toContain('bob')
   })
 
   it('routes a direct conversation only to the members it mentions', () => {
     const { engine, runner } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam({ id: 'direct', name: 'private', kind: 'direct', memberIds: ['a', 'b'], createdAt: '' })
@@ -177,7 +175,7 @@ describe('the team of superagents', () => {
 
   it('closes a round with the lead decision and refuses further work', () => {
     const { engine } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a']))
     engine.proposeTeam('t1', [{ assigneeId: 'a', text: 'do A' }])
@@ -193,7 +191,7 @@ describe('the team of superagents', () => {
   it('wakes only the members a message mentions, and never searches the text', () => {
     const wake = vi.fn()
     const { engine } = harness({ start: vi.fn(), deliver: vi.fn(), stop: vi.fn(), wake })
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', persona: 'You write the copy.', capabilities: ['copy'], createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a', 'b']))
@@ -206,17 +204,16 @@ describe('the team of superagents', () => {
     expect(wake).toHaveBeenCalledWith('a')
     expect(engine.tasks('t1')).toEqual([])
     expect(engine.inbox('a').map(item => item.botId)).toEqual(['a'])
-    // The lead is the main Session, so a mention of it wakes no superagent Session either.
-    engine.sendTeamMessage('t1', 'a', 'back', 'discussion', { mentions: ['lead'] })
-    expect(wake).toHaveBeenCalledTimes(2)
-    expect(wake).toHaveBeenLastCalledWith('lead')
+    // Only the group's owner may speak in it. A member's reply is refused, and wakes nobody.
+    expect(() => engine.sendTeamMessage('t1', 'a', 'back', 'discussion', { mentions: ['lead'] })).toThrow(UserError)
+    expect(wake).toHaveBeenCalledTimes(1)
     engine.updateSuperagent('b', { disabled: { at: '2026-09-23T00:00:00.000Z', by: 'lead' } })
     expect(() => engine.sendTeamMessage('t1', 'lead', 'still there', 'discussion', { mentions: ['b'] })).toThrow(UserError)
-    expect(wake).toHaveBeenCalledTimes(2)
+    expect(wake).toHaveBeenCalledTimes(1)
   })
   it('rejects a mention of a non-member, of the sender, or of more than five members', () => {
     const { engine } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a']))
     expect(() => engine.sendTeamMessage('t1', 'lead', 'hi', 'discussion', { mentions: ['zed'] })).toThrow(UserError)
@@ -226,7 +223,7 @@ describe('the team of superagents', () => {
   })
   it('gathers mentions from several groups into one batch, with each group\'s context', () => {
     const { engine } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a']))
     engine.addTeam({ ...team('t2', ['lead', 'a']), name: 'Second' })
@@ -245,15 +242,15 @@ describe('the team of superagents', () => {
     const wake = vi.fn()
     const { engine } = harness({ start: vi.fn(), deliver: vi.fn(), stop: vi.fn(), wake })
     engine.ensureHuman()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a', 'b']))
-    for (let index = 0; index < TEAM_HOP_LIMIT; index += 1) engine.sendTeamMessage('t1', 'a', `line ${index}`, 'discussion', { mentions: ['b'] })
+    for (let index = 0; index < TEAM_HOP_LIMIT; index += 1) engine.sendTeamMessage('t1', 'lead', `line ${index}`, 'discussion', { mentions: ['a'] })
     expect(engine.team('t1')?.paused?.reason).toBe('hops')
     expect(engine.messages('t1').at(-1)?.kind).toBe('notice')
     const before = wake.mock.calls.length
-    engine.sendTeamMessage('t1', 'b', 'still talking', 'discussion', { mentions: ['a'] })
+    engine.sendTeamMessage('t1', 'lead', 'still talking', 'discussion', { mentions: ['a'] })
     expect(wake.mock.calls.length).toBe(before)
     engine.sendTeamMessage('t1', HUMAN_ID, 'carry on', 'discussion', { mentions: ['a'] })
     expect(engine.team('t1')?.paused).toBeUndefined()
@@ -265,7 +262,7 @@ describe('the team of superagents', () => {
     engine.ensureHuman()
     // A group of the person alone has no lead in it, so it is refused for that rather than for a missing member.
     expect(() => engine.addTeam(team('t1', [HUMAN_ID]))).toThrow(UserError)
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) engine.addSuperagent({ id, name: id, role: 'specialist', createdAt: '' })
     expect(() => engine.addTeam(team('big', ['lead', 'a', 'b', 'c', 'd', 'e', 'f']))).toThrow(UserError)
     const created = engine.addTeam(team('t1', ['lead', 'a']))
@@ -276,7 +273,7 @@ describe('the team of superagents', () => {
   it('holds every bot in the standing all-hands group, so the lead dispatches to any of them', () => {
     const { engine, runner } = harness()
     engine.ensureHuman()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     // The group appeared with the first bot, and holds it and the person.
     expect(engine.team(ALL_HANDS_ID)).toMatchObject({ kind: 'group', leadId: 'lead' })
     expect(engine.team(ALL_HANDS_ID)?.memberIds).toEqual(['lead', HUMAN_ID])
@@ -288,25 +285,28 @@ describe('the team of superagents', () => {
     expect((runner.start as ReturnType<typeof vi.fn>).mock.calls.map(call => call[1].assigneeId)).toEqual(['a'])
   })
 
-  it('leads the all-hands group with the deployment\'s own lead, the main Session', () => {
+  it('starts with Alice as the all-hands owner and keeps Bob out of the group', () => {
     const { engine } = harness()
     engine.ensureHuman()
-    engine.addSuperagent({ id: 'chief', name: 'Chief', role: 'lead', createdAt: '' })
-    // The main Session is registered as a bot of the team, so it leads the group it dispatches in.
-    engine.ensureLead('orchestrator-1', '/state')
-    engine.ensureAllHands()
-    expect(engine.team(ALL_HANDS_ID)?.leadId).toBe('orchestrator-1')
-    expect(engine.team(ALL_HANDS_ID)?.memberIds).toContain('chief')
-    expect(engine.superagent('orchestrator-1')?.role).toBe('lead')
+    expect(engine.ensureAlice('/state/alice')).toMatchObject({ id: 'alice', name: 'Alice', builtin: true, directory: '/state/alice' })
+    expect(engine.team(ALL_HANDS_ID)?.leadId).toBe('alice')
+    expect(engine.team(ALL_HANDS_ID)?.memberIds).toEqual(['alice', HUMAN_ID])
+    engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
+    expect(engine.team(ALL_HANDS_ID)?.memberIds).toEqual(['alice', HUMAN_ID, 'a'])
+    expect(engine.team(ALL_HANDS_ID)?.leadId).toBe('alice')
+    expect(engine.updateSuperagent('alice', { name: 'Alicia' }).name).toBe('Alicia')
+    expect(() => engine.updateSuperagent('alice', { disabled: { at: '2026-09-23T00:00:00.000Z', by: 'bob' } })).toThrow(UserError)
+    expect(() => engine.dissolveTeam(ALL_HANDS_ID, 'no')).toThrow(UserError)
   })
 
   it('keeps a closed all-hands group closed, and holds more bots than a group people build', () => {
     const { engine } = harness()
     engine.ensureHuman()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) engine.addSuperagent({ id, name: id, role: 'specialist', createdAt: '' })
     // The standing group holds every bot, past the limit a group people build has.
     expect(engine.team(ALL_HANDS_ID)?.memberIds).toHaveLength(8)
+    expect(() => engine.dissolveTeam(ALL_HANDS_ID, 'no')).toThrow(UserError)
     // A closed group is not reopened by a bot: only the person reopens it, by speaking in it.
     engine.closeTeam(ALL_HANDS_ID, 'lead', 'round done')
     engine.addSuperagent({ id: 'g', name: 'G', role: 'specialist', createdAt: '' })
@@ -315,7 +315,7 @@ describe('the team of superagents', () => {
   })
 
   it('delegates concrete work to a worker under a team mandate', () => {    const { repo, engine, executor } = harness()
-    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+    engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['lead', 'a']))
     const [a] = engine.proposeTeam('t1', [{ assigneeId: 'a', text: 'do A' }]) as [TeamTask]
@@ -335,7 +335,7 @@ describe('the team of superagents', () => {
 
 it('adds the person to a team created before it existed, so an older group can still be spoken to', () => {
   const { engine } = harness()
-  engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+  engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
   engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
   // A team from a build before the person was a member.
   engine.addTeam({ id: 'old', name: 'Old', kind: 'group', memberIds: ['lead', 'a'], leadId: 'lead', createdAt: '' })
@@ -348,7 +348,7 @@ it('adds the person to a team created before it existed, so an older group can s
 it('treats a close as the end of a round: the person speaking again starts the next one', () => {
   const { engine } = harness()
   engine.ensureHuman()
-  engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+  engine.addSuperagent({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
   engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
   engine.addTeam(team('t1', ['lead', 'a']))
   engine.closeTeam('t1', 'lead', '定：这一轮结束')

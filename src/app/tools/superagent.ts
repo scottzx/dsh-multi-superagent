@@ -1,6 +1,6 @@
 /** Team tools: the lead proposes, dispatches and closes a division; a specialist reports, talks and delegates. */
 import { z } from 'zod'
-import { ALL_HANDS_ID, type EngineForLead, type EngineForSpecialist, type Superagent } from '../../core/index.ts'
+import { ALICE_ID, ALL_HANDS_ID, UserError, type EngineForLead, type EngineForSpecialist, type Superagent } from '../../core/index.ts'
 import type { Store } from '../store.ts'
 import { tool, type Tool } from './tool.ts'
 
@@ -41,36 +41,29 @@ function teamState(store: Pick<Store, 'team'>, teamId: string) {
   if (!team) return undefined
   return { team, tasks: store.team.tasks.list(teamId), messages: store.team.messages.list(teamId) }
 }
-/**
- * The identity a lead tool writes as. The main Session is the team's lead, but its session id is not a team member, so a
- * message or a close is recorded as the team's `leadId`. A direct conversation has no lead: the other member is the recipient.
- */
-function voiceOf(store: Pick<Store, 'team'>, teamId: string, sessionId: string): string {
-  const team = store.team.teams.get(teamId)
-  if (!team) return sessionId
-  if (team.memberIds.includes(sessionId)) return sessionId
-  if (team.leadId && team.memberIds.includes(team.leadId)) return team.leadId
-  const other = team.memberIds.find(id => id !== sessionId)
-  return other ?? sessionId
+/** Map a proposed division into the engine's task specs. */
+function taskSpecs(tasks: readonly { assignee_id: string; text: string; after?: string[]; outputs?: string[] }[]) {
+  return tasks.map(item => ({ assigneeId: item.assignee_id, text: item.text, ...item.after ? { after: item.after } : {},
+    ...item.outputs ? { outputs: item.outputs } : {} }))
 }
 
 /**
- * The lead's tools for a team of superagents: register a superagent, create a team conversation, propose a division, dispatch
- * it, talk to the team, close a round, and read a team's state. The lead stays the admission authority: these tools never
- * admit a candidate or create a Ticket; delegation to a worker is a specialist's tool.
+ * Bob's tools. He hires business superagents, creates a group, names its owner, hands the request to that owner, and
+ * dissolves a group. He is not a member, so he does not speak, propose, or dispatch. Alice already exists.
  */
 export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
   const { engine, store, leadId } = host
   return [
     tool({
       name: 'lead_team_create_superagent',
-      description: 'Register a superagent. It joins the all-hands group.',
-      schema: z.object({ id: MemberSchema, name: z.string().trim().min(1).max(160), role: z.enum(['lead', 'specialist']),
+      description: 'Hire a business superagent. It joins the all-hands group. Alice already exists; do not hire her again.',
+      schema: z.object({ id: MemberSchema, name: z.string().trim().min(1).max(160),
         capabilities: z.array(CapabilitySchema).max(16).optional(), persona: PersonaSchema.optional(),
         skills: z.array(SkillSchema).max(16).optional(), directory: DirectorySchema,
         repository: RepoSchema.optional(), feishu_cli: z.string().trim().max(1000).optional() }).strict(),
       execute: async args => {
-        const superagent = engine.addSuperagent({ id: args.id, name: args.name, role: args.role, ...args.capabilities ? { capabilities: args.capabilities } : {},
+        if (args.id === ALICE_ID) throw new UserError('builtinProtected')
+        const superagent = engine.addSuperagent({ id: args.id, name: args.name, role: 'specialist', ...args.capabilities ? { capabilities: args.capabilities } : {},
           ...args.persona ? { persona: args.persona } : {}, ...args.skills ? { skills: args.skills } : {},
           ...args.directory ? { directory: args.directory } : {}, ...args.repository ? { repository: args.repository } : {},
           ...args.feishu_cli ? { feishuCli: args.feishu_cli } : {}, createdAt: '' })
@@ -106,54 +99,30 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
     }),
     tool({
       name: 'lead_team_create',
-      description: 'Create a team: a group of superagents, or a direct conversation between two.',
+      description: 'Create a group or a direct conversation. You do not join it. For a group, name its owner and pass the person\'s request; that delivers the request to the owner.',
       schema: z.object({ id: MemberSchema, name: TeamNameSchema, kind: z.enum(['group', 'direct']), member_ids: z.array(MemberSchema).min(1).max(16),
-        lead_id: MemberSchema.optional() }).strict(),
+        lead_id: MemberSchema.optional().describe('The group\'s owner. Required for a group, and one of member_ids.'),
+        request: z.string().trim().min(1).max(4000).optional().describe('The person\'s request, delivered to the owner. Not a message from you in the group.') }).strict(),
       execute: async args => {
         const team = engine.addTeam({ id: args.id, name: args.name, kind: args.kind, memberIds: args.member_ids,
           ...args.lead_id ? { leadId: args.lead_id } : {}, createdAt: '' })
-        return { team }
+        const handoff = args.request ? engine.handOffTeam(team.id, args.request) : undefined
+        return { team, ...handoff ? { handoff_id: handoff.id } : {} }
       },
     }),
     tool({
-      name: 'lead_team_propose',
-      description: 'Propose a division: one task per superagent, with what it does, what it waits on, and its deliverables.',
-      schema: z.object({ team_id: MemberSchema, tasks: z.array(TaskSpecSchema).min(1).max(16) }).strict(),
-      execute: async args => {
-        const tasks = engine.proposeTeam(args.team_id, args.tasks.map(item => ({ assigneeId: item.assignee_id, text: item.text,
-          ...item.after ? { after: item.after } : {}, ...item.outputs ? { outputs: item.outputs } : {} })))
-        return { team_id: args.team_id, tasks }
-      },
+      name: 'lead_team_set_owner',
+      description: 'Change a group\'s owner. The new owner is already in the group. You do not join it.',
+      schema: z.object({ team_id: MemberSchema, owner_id: MemberSchema }).strict(),
+      execute: async args => ({ team_id: args.team_id, owner_id: engine.setTeamOwner(args.team_id, args.owner_id).leadId }),
     }),
     tool({
-      name: 'lead_team_dispatch',
-      description: 'Start ready tasks now and return. Do not wait for reports.',
-      schema: z.object({ team_id: MemberSchema }).strict(),
-      execute: async args => {
-        const tasks = engine.dispatchTeam(args.team_id)
-        const started = tasks.filter(task => task.state === 'working' || task.state === 'waiting')
-        return { team_id: args.team_id, started: started.length,
-          tasks: tasks.map(task => ({ task_id: task.id, assignee_id: task.assigneeId, state: task.state,
-            ...task.reason ? { reason: task.reason } : {} })) }
-      },
-    }),
-    tool({
-      name: 'lead_team_message',
-      description: 'Say something as lead. Only `at` wakes anyone.',
-      schema: z.object({ team_id: MemberSchema, text: z.string().trim().min(1).max(4000), at: MentionSchema.optional() }).strict(),
-      execute: async args => {
-        const message = engine.sendTeamMessage(args.team_id, voiceOf(store, args.team_id, leadId), args.text, 'discussion',
-          { ...args.at ? { mentions: args.at } : {} })
-        return { team_id: args.team_id, message_id: message.id, from: message.from, woke: message.mentions ?? [] }
-      },
-    }),
-    tool({
-      name: 'lead_team_close',
-      description: 'Close a round with the lead decision. The team closes and its turns end.',
+      name: 'lead_team_dissolve',
+      description: 'Dissolve a group when the person is done with that matter. A finished round is not a reason. The all-hands group cannot be dissolved.',
       schema: z.object({ team_id: MemberSchema, summary: z.string().trim().min(1).max(4000) }).strict(),
       execute: async args => {
-        const message = engine.closeTeam(args.team_id, voiceOf(store, args.team_id, leadId), args.summary)
-        return { team_id: args.team_id, message_id: message.id, from: message.from }
+        const team = engine.dissolveTeam(args.team_id, args.summary)
+        return { team_id: team.id, closed: team.closed }
       },
     }),
     tool({
@@ -197,7 +166,7 @@ export function superagentTools(host: SuperagentToolsHost): Tool[] {
     }),
     tool({
       name: 'superagent_team_message',
-      description: 'Say something in your team. Only `at` wakes anyone. Never name yourself.',
+      description: 'Say something in a direct conversation, or in a group you own. A group message from anyone else is refused. Only `at` wakes anyone. Never name yourself.',
       schema: z.object({ team_id: MemberSchema, text: z.string().trim().min(1).max(4000), at: MentionSchema.optional() }).strict(),
       execute: async args => {
         const message = engine.sendTeamMessage(args.team_id, superagent.id, args.text, 'discussion', { ...args.at ? { mentions: args.at } : {} })
@@ -217,9 +186,45 @@ export function superagentTools(host: SuperagentToolsHost): Tool[] {
     }),
     tool({
       name: 'superagent_team_read',
-      description: 'Read your team\'s state: the team, its tasks and its messages.',
+      description: 'Read your team\'s state: the team, its tasks and its messages. The group\'s owner is leadId.',
       schema: z.object({ team_id: MemberSchema }).strict(),
       execute: async args => teamState(store, args.team_id) ?? { error: 'Unknown team' },
+    }),
+    tool({
+      name: 'superagent_team_add_member',
+      description: 'As this group\'s owner, add a business superagent. Not the all-hands group, whose membership follows hiring.',
+      schema: z.object({ team_id: MemberSchema, member_id: MemberSchema }).strict(),
+      execute: async args => ({ team_id: args.team_id, member_ids: engine.addTeamMember(args.team_id, superagent.id, args.member_id).memberIds }),
+    }),
+    tool({
+      name: 'superagent_team_remove_member',
+      description: 'As this group\'s owner, remove a member other than yourself. You cannot dissolve the group by leaving it.',
+      schema: z.object({ team_id: MemberSchema, member_id: MemberSchema }).strict(),
+      execute: async args => ({ team_id: args.team_id, member_ids: engine.removeTeamMember(args.team_id, superagent.id, args.member_id).memberIds }),
+    }),
+    tool({
+      name: 'superagent_team_propose',
+      description: 'As this group\'s owner, propose a division: one task per member, with what it does, what it waits on, and its deliverables.',
+      schema: z.object({ team_id: MemberSchema, tasks: z.array(TaskSpecSchema).min(1).max(16) }).strict(),
+      execute: async args => {
+        const team = store.team.teams.get(args.team_id)
+        if (!team || team.leadId !== superagent.id) throw new UserError('notGroupOwner')
+        const tasks = engine.proposeTeam(args.team_id, taskSpecs(args.tasks))
+        return { team_id: args.team_id, tasks }
+      },
+    }),
+    tool({
+      name: 'superagent_team_dispatch',
+      description: 'As this group\'s owner, start ready tasks now and return. Do not wait for reports.',
+      schema: z.object({ team_id: MemberSchema }).strict(),
+      execute: async args => {
+        const team = store.team.teams.get(args.team_id)
+        if (!team || team.leadId !== superagent.id) throw new UserError('notGroupOwner')
+        const tasks = engine.dispatchTeam(args.team_id)
+        return { team_id: args.team_id, started: tasks.filter(task => task.state === 'working' || task.state === 'waiting').length,
+          tasks: tasks.map(task => ({ task_id: task.id, assignee_id: task.assigneeId, state: task.state,
+            ...task.reason ? { reason: task.reason } : {} })) }
+      },
     }),
   ]
 }

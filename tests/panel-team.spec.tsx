@@ -121,3 +121,90 @@ it('shows a conflict when AGENTS.md changed while it was being edited', async ()
   expect(field<HTMLTextAreaElement>(zh.profileAgentsMd).value).toBe('mine')
   expect(document.querySelector('[role="dialog"]')).not.toBeNull()
 })
+
+it('shows Bob as the HR-orchestrator outside groups and opens his Session', async () => {
+  await mount()
+  await click(tab(zh['tab.team']))
+  const bob = document.querySelector('.dt-org-bob')
+  expect(bob).not.toBeNull()
+  expect(bob?.textContent).toContain(zh.bobName)
+  expect(bob?.textContent).toContain(zh.bobRole)
+  expect(bob?.textContent).toContain(zh.bobOutsideGroups)
+  await click(bob!.querySelector('button') as HTMLElement)
+  expect(server.opened).toContain('master')
+})
+
+it('filters the human out of specialist cards and lets you edit a specialist or open its brief', async () => {
+  server.superagents = { superagents: [
+    { id: 'me', name: 'You', role: 'human' },
+    { id: 'alice', name: 'Alice', role: 'specialist', builtin: true, capabilities: ['general'] },
+    { id: 'writer', name: 'Writer', role: 'specialist', capabilities: ['copy'], directory: '/Users/scott/projects/copy' },
+  ] }
+  await mount()
+  await click(tab(zh['tab.team']))
+  const cards = all('.dt-member-card')
+  expect(cards).toHaveLength(2)
+  expect(cards[0]!.textContent).toContain('Alice')
+  expect(cards[0]!.textContent).toContain(zh.rosterBuiltin)
+  expect(cards.some(card => card.textContent?.includes('You'))).toBe(false)
+  // Edit Writer's persona via the card action.
+  const writerCard = cards.find(card => card.textContent?.includes('Writer'))!
+  const editBtn = [...writerCard.querySelectorAll('button')].find(btn => btn.textContent?.trim() === zh.superagentEdit)!
+  await click(editBtn)
+  const personaBox = document.querySelector<HTMLTextAreaElement>('[role="dialog"] textarea')!
+  await type(personaBox, 'Concise editorial voice')
+  await click(zh.superagentSave)
+  const saved = server.requests.find(request => request.method === 'POST' && request.path.includes('superagents/writer'))
+  expect(saved?.body).toMatchObject({ name: 'Writer', persona: 'Concise editorial voice' })
+  expect(text()).toContain('Concise editorial voice')
+})
+
+it('creates a new group with chosen specialists and owner', async () => {
+  await mount()
+  await click(tab(zh['tab.team']))
+  await click(zh.teamCreate)
+  const dialog = document.querySelector('[role="dialog"]')!
+  const nameInput = dialog.querySelector<HTMLInputElement>('input:not([type="checkbox"])')!
+  await type(nameInput, '前端改版组')
+  await click(zh.confirm)
+  const created = server.requests.find(request => request.method === 'POST' && request.path === 'teams')
+  expect(created?.body).toMatchObject({ name: '前端改版组', kind: 'group', member_ids: ['lead', 'writer'], lead_id: 'lead' })
+  expect(text()).toContain('前端改版组')
+})
+
+it('changes a group owner from the detail page and renders Bob handoff notices distinctly', async () => {
+  server.teamDetails.team1!.messages.push({
+    id: 'm3', from: 'bob', fromName: 'Bob', text: 'Bob 转交了新需求：改版首页', at: '2026-09-23T00:05:00Z', kind: 'notice',
+  })
+  await mount()
+  await click(tab(zh['tab.team']))
+  await click('文案团队')
+  expect(document.querySelector('.dt-chat-notice-bob')?.textContent).toContain(zh.bobHandoffLabel)
+  await click(zh.teamChangeOwner)
+  const select = document.querySelector<HTMLSelectElement>('[role="dialog"] select')!
+  await type(select, 'writer')
+  await click(zh.confirm)
+  const req = server.requests.find(request => request.method === 'POST' && request.path.includes('teams/team1/owner'))
+  expect(req?.body).toEqual({ owner_id: 'writer' })
+  expect(text()).toContain(zh.teamOwnerChanged)
+})
+
+it('marks all-hands as standing and hides the close action on its detail page', async () => {
+  const allHands = {
+    id: 'all-hands', name: 'All-hands', kind: 'group' as const,
+    members: [
+      { id: 'me', name: 'You', role: 'human' },
+      { id: 'alice', name: 'Alice', role: 'specialist', builtin: true },
+    ],
+    leadId: 'alice',
+    counts: { proposed: 0, waiting: 0, working: 0, done: 0, failed: 0 },
+  }
+  server.teams.teams.push(allHands)
+  server.teamDetails['all-hands'] = { team: allHands, tasks: [], messages: [], statuses: [] }
+  await mount()
+  await click(tab(zh['tab.team']))
+  expect(text()).toContain(zh.teamStanding)
+  await click(zh.teamAllHands)
+  expect(document.querySelector('.dt-page-title h2')?.textContent).toBe(zh.teamAllHands)
+  expect(all('button').some(btn => btn.textContent?.trim() === zh.teamClose)).toBe(false)
+})

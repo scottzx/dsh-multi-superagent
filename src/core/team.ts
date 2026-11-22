@@ -1,7 +1,7 @@
 /** Teams: the team of superagents — identities, conversations, tasks, and the dispatch state machine. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { ALL_HANDS_ID, TEAM_BOT_LIMIT, TEAM_HOP_LIMIT, TEAM_MENTION_LIMIT, openTeam, superagentActive } from './model.ts'
+import { ALICE_ID, ALL_HANDS_ID, TEAM_BOT_LIMIT, TEAM_HOP_LIMIT, TEAM_MENTION_LIMIT, openTeam, superagentActive } from './model.ts'
 import type { InboxItem, Superagent, SuperagentTurn, Team, TeamMessage, TeamMessageKind, TeamTask } from './model.ts'
 import type { Reason } from './reasons.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
@@ -16,6 +16,8 @@ const NOOP_SUPERAGENT: SuperagentRunner = { start() {}, deliver() {}, stop() {} 
 export const HUMAN_ID = 'me'
 /** The name the standing all-hands group is stored under; the panel shows its own wording for it. */
 export const ALL_HANDS_NAME = 'All-hands'
+/** Who Alice is until someone renames her. Bob hires everyone else; she is already here. */
+const ALICE_PERSONA = '你是 Alice，本部署默认的业务 superagent，和之后招募的业务成员同一位置。Bob 建群并把一件事交给群主；你当群主时负责加人、踢人、在群里说话、派任务。你不能建群，也不能解散群。'
 
 /**
  * The `Teams` part owns the team of superagents.
@@ -27,8 +29,6 @@ export const ALL_HANDS_NAME = 'All-hands'
  * Ticket under a team mandate. It writes every team record itself; the `SuperagentRunner` only reports facts about turns back.
  */
 export class Teams extends EnginePart {
-  /** The deployment's own lead, registered by `ensureLead`; it leads the all-hands group. */
-  private deploymentLead?: string
   constructor(options: EngineOptions, private readonly tickets: Tickets) { super(options) }
 
   // Superagents and teams
@@ -40,66 +40,50 @@ export class Teams extends EnginePart {
     const value = { ...superagent, createdAt: superagent.createdAt || at }
     this.repo.team.superagents.save(value)
     this.emit('superagent.added', { superagentId: value.id })
-    // A new bot joins the standing all-hands group, so the lead dispatches to it without building a group first.
+    // A new business member joins the standing all-hands group. Bob is not a superagent, so he never joins it.
     if (value.role !== 'human') this.ensureAllHands()
     return value
   }
   /**
-   * The standing all-hands group: every bot belongs to it, so the lead dispatches to anyone in one step. It appears with the
-   * first bot that can lead it, and holds every bot registered so far; a bot registered later joins it. The person is a member
-   * too, because the person speaks there.
-   *
-   * Its lead is the deployment's own lead: the main Session's identity, which the plugin registers at startup, or the first
-   * lead-role bot when the main Session holds none. A closed group is not reopened here: only the person reopens a group, by
-   * speaking in it.
+   * Alice, the business superagent a deployment starts with. Created once; a later start keeps the name and persona someone
+   * gave her and only restores the protection that she cannot be disabled. She is the first owner of the all-hands group.
+   */
+  ensureAlice(directory?: string): Superagent {
+    const existing = this.repo.team.superagents.get(ALICE_ID)
+    if (existing) {
+      const next: Superagent = { ...existing, role: 'specialist', builtin: true, ...existing.directory || !directory ? {} : { directory } }
+      this.repo.team.superagents.save(next)
+      this.ensureAllHands()
+      return next
+    }
+    return this.addSuperagent({ id: ALICE_ID, name: 'Alice', role: 'specialist', builtin: true, persona: ALICE_PERSONA,
+      ...directory ? { directory } : {}, createdAt: '' })
+  }
+  /**
+   * The standing all-hands group: every business superagent belongs to it, and the person does too. Bob does not. Its owner
+   * stays whoever it already has, when that member is still in it; otherwise Alice, or the first business member. Hiring
+   * joins the group. It is not a group its owner edits, and it is not dissolved.
    */
   ensureAllHands(): Team | undefined {
-    const bots = this.superagents().filter(superagent => superagent.role !== 'human')
-    const lead = this.allHandsLead(bots)
-    if (!lead) return undefined
+    const bots = this.superagents().filter(superagent => superagent.role === 'specialist')
+    if (!bots.length) return undefined
     const memberIds = [...bots.map(superagent => superagent.id), ...this.humanIds()]
+    const preferred = bots.find(superagent => superagent.id === ALICE_ID)?.id ?? bots[0]!.id
     const current = this.repo.team.teams.get(ALL_HANDS_ID)
     if (!current) {
-      const value: Team = { id: ALL_HANDS_ID, name: ALL_HANDS_NAME, kind: 'group', memberIds, leadId: lead.id, createdAt: this.now() }
+      const value: Team = { id: ALL_HANDS_ID, name: ALL_HANDS_NAME, kind: 'group', memberIds, leadId: preferred, createdAt: this.now() }
       this.repo.team.teams.save(value)
       this.emit('team.created', { teamId: value.id })
       return value
     }
-    // The group keeps the lead it has while a round runs under it; otherwise the deployment's lead takes it over.
-    const leadId = current.leadId && current.leadId !== lead.id && this.roundOpen(current.id) ? current.leadId : lead.id
-    const added = memberIds.filter(id => !current.memberIds.includes(id))
-    if (!added.length && leadId === current.leadId) return current
-    const next: Team = { ...current, memberIds: [...current.memberIds, ...added], leadId }
+    const kept = current.memberIds.filter(id => memberIds.includes(id))
+    const added = memberIds.filter(id => !kept.includes(id))
+    const leadId = current.leadId && kept.includes(current.leadId) ? current.leadId : preferred
+    if (!added.length && leadId === current.leadId && kept.length === current.memberIds.length) return current
+    const next: Team = { ...current, memberIds: [...kept, ...added], leadId }
     this.repo.team.teams.save(next)
-    this.emit('team.members.added', { teamId: next.id, memberIds: added })
+    if (added.length) this.emit('team.members.added', { teamId: next.id, memberIds: added })
     return next
-  }
-  /** The all-hands group's lead: the deployment's own lead when it is registered, else the first lead-role bot. */
-  private allHandsLead(bots: readonly Superagent[]): Superagent | undefined {
-    const deploymentLead = this.deploymentLead ?? this.options.leadId
-    if (deploymentLead) {
-      const found = bots.find(superagent => superagent.id === deploymentLead)
-      if (found) return found
-    }
-    return bots.find(superagent => superagent.role === 'lead')
-  }
-  /** Whether a team has a round in flight: a task proposed, waiting or working. */
-  private roundOpen(teamId: string): boolean {
-    return this.tasks(teamId).some(task => task.state === 'proposed' || task.state === 'waiting' || task.state === 'working')
-  }
-  /**
-   * The main Session's identity as a bot of the team, so the lead is a member of the groups it dispatches in and its mentions
-   * arrive in its own Session. Created once at startup; an identity registered under the same id keeps the name and persona a
-   * person gave it. `directory` is where the main Session works, so its brief is the one of that directory.
-   */
-  ensureLead(id: string, directory?: string): Superagent {
-    this.deploymentLead = id
-    const existing = this.repo.team.superagents.get(id)
-    if (existing) return existing
-    const lead: Superagent = { id, name: 'Orchestrator', role: 'lead', ...directory ? { directory } : {}, createdAt: this.now() }
-    this.repo.team.superagents.save(lead)
-    this.emit('superagent.added', { superagentId: lead.id })
-    return lead
   }
   /**
    * Change a superagent's persona, skills, directory or disabled state. A field left out is kept; `null` clears it.
@@ -122,6 +106,7 @@ export class Teams extends EnginePart {
     else if (change.repository !== undefined) next.repository = change.repository
     if (change.feishuCli === null) delete next.feishuCli
     else if (change.feishuCli !== undefined) next.feishuCli = change.feishuCli
+    if (change.disabled && next.builtin) throw new UserError('builtinProtected')
     if (change.disabled === null) delete next.disabled
     else if (change.disabled) next.disabled = change.disabled
     this.repo.team.superagents.save(next)
@@ -131,10 +116,10 @@ export class Teams extends EnginePart {
   /** Every superagent identity, oldest first. */
   superagents(): Superagent[] { return this.repo.team.superagents.list() }
   /**
-   * Create a team conversation. A group needs a lead among its members, and that lead is a bot: the person can speak in any
-   * group but is not the admission authority. A group may hold at most `TEAM_BOT_LIMIT` bots; the person is added to every new
-   * team, so it can be spoken to in it.
-   * @throws UserError when the id is taken, a member is unknown, a group has no lead in it, or a group has too many bots.
+   * Create a team conversation. A group needs an owner among its members, and that owner is a business superagent: the person
+   * can speak in any group but is not its owner, and Bob is not a member. A group may hold at most `TEAM_BOT_LIMIT` bots; the
+   * person is added to every new team, so it can be spoken to in it.
+   * @throws UserError when the id is taken, a member is unknown, a group has no owner in it, or a group has too many bots.
    */
   addTeam(team: Team): Team {
     const at = this.now()
@@ -149,6 +134,94 @@ export class Teams extends EnginePart {
     this.repo.team.teams.save(value)
     this.emit('team.created', { teamId: value.id })
     return value
+  }
+  /**
+   * Name a group's owner. The new owner is already a member, and is not the person. Bob calls this; the owner cannot.
+   * @throws UserError when the team is unknown, not a group, or the owner is not a business member of it.
+   */
+  setOwner(teamId: string, ownerId: string): Team {
+    const team = this.teamOf(teamId)
+    if (!openTeam(team)) throw new UserError('teamClosed')
+    if (team.kind !== 'group') throw new UserError('notAGroup')
+    const owner = this.superagent(ownerId)
+    if (!owner || owner.role === 'human' || !team.memberIds.includes(ownerId)) throw new UserError('teamLeadMissing')
+    const next = { ...team, leadId: ownerId }
+    this.repo.team.teams.save(next)
+    return next
+  }
+  /**
+   * The owner adds a business superagent to this group. The all-hands group is not edited this way: hiring joins it.
+   * @throws UserError when the caller is not the owner, or the group cannot take another member.
+   */
+  addMember(teamId: string, by: string, memberId: string): Team {
+    const team = this.ownedGroup(teamId, by)
+    const member = this.superagent(memberId)
+    if (!member || member.role === 'human') throw new UserError('unknownSuperagent', { superagent: memberId })
+    if (team.memberIds.includes(memberId)) return team
+    const memberIds = [...team.memberIds, memberId]
+    const bots = memberIds.filter(id => this.superagent(id)?.role === 'specialist')
+    if (bots.length > TEAM_BOT_LIMIT) throw new UserError('teamTooLarge', { limit: String(TEAM_BOT_LIMIT) })
+    const next = { ...team, memberIds }
+    this.repo.team.teams.save(next)
+    this.emit('team.members.added', { teamId, memberIds: [memberId] })
+    return next
+  }
+  /**
+   * The owner removes a member other than themselves. The person stays, and so does the owner.
+   * @throws UserError when the caller is not the owner, or the member is the owner or the person.
+   */
+  removeMember(teamId: string, by: string, memberId: string): Team {
+    const team = this.ownedGroup(teamId, by)
+    if (memberId === by || memberId === team.leadId) throw new UserError('cannotRemoveSelf')
+    if (this.isHuman(memberId)) throw new UserError('notAMember', { member: memberId })
+    if (!team.memberIds.includes(memberId)) throw new UserError('notAMember', { member: memberId })
+    const next = { ...team, memberIds: team.memberIds.filter(id => id !== memberId) }
+    this.repo.team.teams.save(next)
+    return next
+  }
+  /**
+   * Dissolve a group. Bob calls this; an owner cannot, and the all-hands group cannot be dissolved. Running turns stop.
+   * The record stays, so the person speaking in it can open it again.
+   */
+  dissolve(teamId: string, summary: string): Team {
+    const team = this.teamOf(teamId)
+    if (team.id === ALL_HANDS_ID) throw new UserError('allHandsStanding')
+    if (!openTeam(team)) throw new UserError('teamClosed')
+    const at = this.now()
+    const closed: Team = { ...team, closed: { at, by: 'bob', summary } }
+    this.repo.team.teams.save(closed)
+    this.repo.team.messages.save({ id: key('team-message', teamId, 'system', at, 'dissolve', summary), teamId, from: 'system',
+      text: summary, at, kind: 'notice' })
+    for (const task of this.tasks(teamId)) if (task.turn && task.turn.state !== 'ended') this.runner().stop(closed, task, 'The group was dissolved')
+    this.emit('team.closed', { teamId, by: 'bob' })
+    return closed
+  }
+  /**
+   * Deliver a request to a group's owner without Bob joining the group or speaking in it. The owner reads it from the inbox.
+   * @throws UserError when the team is unknown, closed, or has no owner.
+   */
+  handOff(teamId: string, text: string): TeamMessage {
+    const team = this.teamOf(teamId)
+    if (!openTeam(team)) throw new UserError('teamClosed')
+    const owner = team.leadId
+    if (!owner || !team.memberIds.includes(owner)) throw new UserError('teamLeadMissing')
+    const at = this.now()
+    const message: TeamMessage = { id: key('team-message', teamId, 'bob', at, 'handoff', text), teamId, from: 'bob', text, at,
+      kind: 'notice', mentions: [owner] }
+    this.repo.team.messages.save(message)
+    this.repo.team.inbox.save({ botId: owner, messageId: message.id, teamId, at, state: 'pending' })
+    this.emit('team.message', { messageId: message.id, teamId })
+    this.runner().wake?.(owner)
+    return message
+  }
+  /** A group its owner may edit. The all-hands group is not one of them. */
+  private ownedGroup(teamId: string, by: string): Team {
+    const team = this.teamOf(teamId)
+    if (!openTeam(team)) throw new UserError('teamClosed')
+    if (team.kind !== 'group') throw new UserError('notAGroup')
+    if (team.id === ALL_HANDS_ID) throw new UserError('allHandsStanding')
+    if (team.leadId !== by) throw new UserError('notGroupOwner')
+    return team
   }
   /**
    * The person's identity, created once at startup so a group can always include it. The person runs no Session: it stands
@@ -209,6 +282,8 @@ export class Teams extends EnginePart {
     const team = reopened
     if (!openTeam(team)) throw new UserError('teamClosed')
     if (!team.memberIds.includes(from)) throw new UserError('notAMember', { member: from })
+    // A group message is the owner's. A direct conversation has no owner, and the person may speak in either.
+    if (team.kind === 'group' && !this.isHuman(from) && from !== team.leadId) throw new UserError('notGroupOwner')
     const mentions = this.checkedMentions(team, from, options.mentions ?? [])
     if (options.replyTo !== undefined && !this.messages(teamId).some(message => message.id === options.replyTo)) {
       throw new UserError('unknownMessage', { message: options.replyTo })

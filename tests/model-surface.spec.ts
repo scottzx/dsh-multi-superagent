@@ -261,7 +261,8 @@ function collect(host: Host, { a, b, workerA, workerB, refusal }: Awaited<Return
       surfaces.push({ where: `${role} tool ${tool.name}`, owner: TOOLS, role, text: descriptions.join('\n') })
     }
   }
-  for (const { name, description, content } of host.skills.get(runtime.masterId)!) {
+  expect(host.skills.get(runtime.masterId)).toEqual([])
+  for (const { name, description, content } of host.skills.get(workerA)!) {
     surfaces.push({ where: `skill ${name}`, owner: PROMPTS, role: 'both', text: `${description}\n${content}` })
   }
   surfaces.push({ where: 'orchestrator tool orchestrator_reply error', owner: ERRORS, role: 'orchestrator', text: refusal })

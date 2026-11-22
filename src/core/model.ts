@@ -324,15 +324,23 @@ export interface Follow { thread: string; own: boolean; closed?: { at: string; o
 export interface Execution { name: string; directory: string; assignment: string }
 
 /**
- * A superagent is a first-class agent identity in the domain: the lead, a professional superagent, or the person in the
- * team chat. A `human` member runs no Session: it is one fixed person (`me`), and its messages are what wake the others.
+ * A superagent is a business member or the person in the team chat. Bob, the orchestrator, is not one of these: he hires
+ * members and creates groups, and he is not a member of any group. A `human` member runs no Session: it is one fixed
+ * person (`me`), and its messages are what wake the others.
  */
-export type SuperagentRole = 'lead' | 'specialist' | 'human'
+export type SuperagentRole = 'specialist' | 'human'
+/** The id of Alice, the business superagent every deployment starts with. Her name can change; she cannot be removed. */
+export const ALICE_ID = 'alice'
 export interface Superagent {
   id: string
   name: string
   role: SuperagentRole
-  /** Capabilities are prompt text the lead uses to divide work; the core does not interpret them. */
+  /**
+   * The default business superagent. Her name can change. She cannot be disabled or removed, and she is otherwise the
+   * same kind of member as anyone hired later.
+   */
+  builtin?: boolean
+  /** Capabilities are prompt text an owner uses to divide work; the core does not interpret them. */
   capabilities?: string[]
   /**
    * Who this superagent is, in its own words: role, method and what it delivers. Injected into its Session's system
@@ -341,10 +349,10 @@ export interface Superagent {
   persona?: string
   /** Skill names bound to this superagent, registered on its Session in addition to the deployment's skills. */
   skills?: string[]
-  /** A person or the lead paused this superagent: it keeps its identity, but starts no turn and receives no message. */
+  /** A person paused this superagent: it keeps its identity, but starts no turn and receives no message. Alice cannot be paused. */
   disabled?: { at: string; by: string }
   /**
-   * The project directory this superagent's Session runs in, when the lead bound one to it. One directory may host one
+   * The project directory this superagent's Session runs in, when one was bound to it. One directory may host one
    * superagent, so a specialist can be pointed at its own checkout or module. Optional: when it is absent (or blank),
    * the runner falls back to the machine's state directory.
    */
@@ -362,7 +370,7 @@ export interface Superagent {
 export const superagentActive = (superagent: Pick<Superagent, 'disabled'>): boolean => !superagent.disabled
 /**
  * The directory a superagent's Session runs in: its bound project directory, or its own directory under `fallback` when the
- * lead bound none. One directory per superagent matters beyond tidiness: DSH injects the `AGENTS.md` of the working directory
+ * none was bound. One directory per superagent matters beyond tidiness: DSH injects the `AGENTS.md` of the working directory
  * into the Session, so a shared directory would give every superagent the same one.
  */
 export const superagentWorkspace = (superagent: Superagent | undefined, fallback: string): string =>
@@ -370,15 +378,15 @@ export const superagentWorkspace = (superagent: Superagent | undefined, fallback
     : superagent === undefined ? fallback : join(fallback, 'superagents', superagent.id)
 /** A team is a conversation between superagents: a group of several, or a direct conversation between two. */
 export type TeamKind = 'group' | 'direct'
-/** The most bot members a group may have, the lead included; the person is added on top of them. */
+/** The most bot members a group may have, its owner included; the person is added on top of them. */
 export const TEAM_BOT_LIMIT = 6
 /** The most members one message may mention, so a single line cannot fan out to the whole team. */
 export const TEAM_MENTION_LIMIT = 5
 /** The most turns of bot-to-bot mentions allowed between two human messages before the group pauses itself. */
 export const TEAM_HOP_LIMIT = 30
 /**
- * The id of the deployment's standing all-hands group: every bot belongs to it, so the lead dispatches to anyone without
- * building a group first. Its name is the panel's own wording, not this one.
+ * The id of the deployment's standing all-hands group: every business superagent belongs to it, and Bob does not.
+ * Its name is the panel's own wording, not this one.
  */
 export const ALL_HANDS_ID = 'all-hands'
 export interface Team {
@@ -386,7 +394,7 @@ export interface Team {
   name: string
   kind: TeamKind
   memberIds: string[]
-  /** The member who proposes the division and closes the round; a direct team has none. */
+  /** The member who owns this group: speaks in it, adds and removes members, and proposes its tasks. A direct team has none. Bob is never it. */
   leadId?: string
   createdAt: string
   closed?: { at: string; by: string; summary: string }

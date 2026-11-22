@@ -20,7 +20,7 @@ function fixture(listed: string[]) {
     slots: { inject: (_name: string, register: () => void) => register(), register: (options: Entry['options'], component: Entry['component']) => { entries.push({ options, component }); return () => {} } },
     locale: { register: (ns: string, value: unknown) => { dictionaries[ns] = value; return () => {} }, bind: () => t },
     effect: (effect: () => unknown) => { effect() },
-    sessions: { list: { getSnapshot: () => ({ phase: 'ready', byId: Object.fromEntries(listed.map(id => [id, {}])) }) }, refresh: vi.fn(async () => {}) },
+    sessions: { list: { getSnapshot: () => ({ phase: 'ready', byId: Object.fromEntries(listed.map(id => [id, {}])) }), subscribe: () => () => {} }, refresh: vi.fn(async () => {}) },
     uiWorkspace: { openSession: vi.fn() },
     // Omit config form service so Deployment renders read-only.
     get: () => undefined,
@@ -155,4 +155,40 @@ it('tells a dsh-superagent that does not answer from a record it does not have, 
     status: 400, missing: false, unreachable: false })
   expect(await failure(async () => Response.json({ error: 'Unknown ticket', code: 'unknownTicket' }, { status: 404 }))).toEqual({
     message: 'user unknownTicket', status: 404, missing: true, unreachable: false })
+})
+
+it('pins Bob (HR-orchestrator) in the sidebar roster in both wide and rail modes and opens his Session', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    const path = new URL(url, 'http://127.0.0.1').pathname.replace('/orchestrator/api/', '')
+    if (path === 'state') return Response.json({ masterId: 'master', superagents: [{ id: 'alice', name: 'Alice', role: 'specialist', builtin: true }],
+      settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
+      setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
+    if (path === 'superagents') return Response.json({ superagents: [
+      { id: 'me', name: 'You', role: 'human' },
+      { id: 'alice', name: 'Alice', role: 'specialist', builtin: true },
+    ] })
+    if (path === 'teams') return Response.json({ teams: [
+      { id: 'all-hands', name: 'All-hands', kind: 'group', leadId: 'alice', members: [{ id: 'me', name: 'You', role: 'human' }, { id: 'alice', name: 'Alice', role: 'specialist', builtin: true }], counts: { proposed: 0, waiting: 0, working: 0, done: 0, failed: 0 } },
+    ] })
+    return Response.json({ error: 'unavailable' }, { status: 503 })
+  }))
+  const { ctx, entries } = fixture(['master', 'superagent-alice'])
+  const workspaces = entries.find(entry => entry.options.name === 'sidebar.workspaces')!
+  const wide = await render(workspaces, { wide: true })
+  const bobBtn = wide.container.querySelector<HTMLButtonElement>('.dt-roster-bob')
+  expect(bobBtn).not.toBeNull()
+  expect(bobBtn?.textContent).toContain(zh.bobName)
+  expect(bobBtn?.textContent).toContain(zh.bobBadge)
+  expect(wide.container.textContent).toContain('Alice')
+  expect(wide.container.textContent).not.toContain('You')
+  await act(async () => { bobBtn!.click() })
+  for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  expect(ctx.uiWorkspace.openSession).toHaveBeenCalledWith('master')
+  wide.dispose()
+
+  const rail = await render(workspaces, { wide: false })
+  const railBob = rail.container.querySelector<HTMLButtonElement>('.dt-roster-mark-bob')
+  expect(railBob).not.toBeNull()
+  expect(railBob?.title).toContain(zh.bobName)
+  rail.dispose()
 })

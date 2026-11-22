@@ -3,7 +3,7 @@ import type { Team, TeamMessage, TeamMessageKind, TeamTask, TeamTaskState } from
 import type { Store } from '../store.ts'
 
 /** A superagent identity as the panel shows it. */
-export interface SuperagentRow { id: string; name: string; role: string; /** Its bound project directory, when the lead set one. */ directory?: string;
+export interface SuperagentRow { id: string; name: string; role: string; builtin?: boolean; /** Its bound project directory, when one was set. */ directory?: string;
   capabilities?: string[]; persona?: string; skills?: string[]; repository?: string; feishuCli?: string; disabled?: { at: string; by: string } }
 /** A team's tasks by state, for the list row's counts. */
 export interface TeamCounts { proposed: number; waiting: number; working: number; done: number; failed: number }
@@ -49,12 +49,13 @@ export interface TeamListView { teams: TeamSummary[] }
 /** One team's state: its summary, its tasks, its messages, and what each of its superagents is doing. */
 export interface TeamDetailView { team: TeamSummary; tasks: TeamTaskRow[]; messages: TeamMessageRow[]; statuses: MemberStatusRow[] }
 
-/** The superagent identity's display name, falling back to its id. */
-const name = (store: Store, id: string): string => store.team.superagents.get(id)?.name ?? id
+/** The superagent identity's display name, recognizing Bob (the HR orchestrator outside groups) and falling back to its id. */
+const name = (store: Store, id: string): string => store.team.superagents.get(id)?.name ?? (id === 'bob' ? 'Bob' : id)
 /** A superagent as the panel lists it, keeping only the fields it shows. */
 function superagentRow(store: Store, id: string): SuperagentRow {
   const superagent = store.team.superagents.get(id)
-  return { id, name: name(store, id), role: superagent?.role ?? 'specialist', ...superagent?.directory ? { directory: superagent.directory } : {},
+  return { id, name: name(store, id), role: superagent?.role ?? 'specialist', ...superagent?.builtin ? { builtin: true } : {},
+    ...superagent?.directory ? { directory: superagent.directory } : {},
     ...superagent?.capabilities?.length ? { capabilities: superagent.capabilities } : {}, ...superagent?.persona ? { persona: superagent.persona } : {},
     ...superagent?.skills?.length ? { skills: superagent.skills } : {}, ...superagent?.repository ? { repository: superagent.repository } : {},
     ...superagent?.feishuCli ? { feishuCli: superagent.feishuCli } : {}, ...superagent?.disabled ? { disabled: superagent.disabled } : {} }

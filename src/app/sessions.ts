@@ -60,33 +60,12 @@ declare module '@deepseek-ai/cordis' {
  */
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
   'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
-/** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
-const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
-  + 'end the turn instead of waiting for them.'
-/** What a main Session under `standard` is told when its command would wait the shell's default. */
-const DEFAULT_WAIT = 'This shell waits up to 60 seconds by default: pass timeoutMs of at most 30000, or run_in_background, '
-  + 'as a waiting step holds back new candidates.'
-/** `sleep` at a command position: the start, after ; & | ( { ! ` or a newline, or after a keyword or a command that runs it. */
-const SLEEP = /(?:^|[;&|({!`\n]|\b(?:do|then|else|elif|if|while|until|time|exec|nohup|command|env)\s)\s*(?:\S*\/)?sleep\b/
-/**
- * The main Session's guard: it refuses a bash command that runs sleep or asks to hold the step longer than 30 seconds, and a
- * job wait longer than 5 seconds. Under `standard`, as a main Session created before the router preset runs, the shell holds
- * a command 60 seconds and a job wait lasts 30 seconds by default, so a command needs a timeout or the background, and a
- * job wait its timeout; the router preset ends both after 5 seconds.
- */
-function noWait({ name, arguments: input }: { name: string; arguments: unknown }, routed: () => boolean): string | undefined {
-  const args = (input ?? {}) as { command?: unknown; timeoutMs?: unknown; run_in_background?: unknown; wait?: unknown; timeout_ms?: unknown }
-  if (name === 'bash') {
-    const sleeps = typeof args.command === 'string' && SLEEP.test(args.command)
-    if (sleeps || typeof args.timeoutMs === 'number' && args.timeoutMs > 30_000) return NO_WAIT
-    if (args.timeoutMs === undefined && args.run_in_background !== true && !routed()) return DEFAULT_WAIT
-  }
-  if (name === 'job_output' && args.wait === true && (typeof args.timeout_ms === 'number' ? args.timeout_ms > 5_000 : !routed())) return NO_WAIT
-  return undefined
-}
+/** What the main Session (Bob) is told if anything attempts a local execution tool outside his orchestration/dispatch tools. */
+const DISPATCH_ONLY = 'Bob has no execution tools; dispatch work through a ticket or a superagent group instead of running commands or reading files directly.'
 
 /** The tools a superagent may use with no task of its own: answering a message it was mentioned in, and reading the team. */
-const TALK_TOOLS = new Set(['superagent_team_message', 'superagent_team_read'])
+const TALK_TOOLS = new Set(['superagent_team_message', 'superagent_team_read', 'superagent_team_add_member',
+  'superagent_team_remove_member', 'superagent_team_propose', 'superagent_team_dispatch'])
 /**
  * Creates and decorates orchestrator and worker DSH `Agent` sessions with role models, system prompt sections from `Prompts`, runtime skills, and restricted tool sets.
  * `Runtime`, `DshExecutor`, `MasterAssessor`, `Settings`, and management routes/tools use it to ensure sessions, deliver deduplicated messages via `AgentDelivery`, and process ordered `relay` and `notice` effects.
@@ -254,21 +233,30 @@ export class Sessions {
       const who = superagent ? this.personaOf(superagent.id) : ''
       return `[dsh-superagent prompt revision ${version.revision}]\n${composed}${who}\n${current ? mandateInstructions(current.mandate) : ''}`
     }, ...(master ? { complete: true } : {}) }))
-    // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
-    const skillScope = agent.ctx.inject(['skills'], scope => {
-      binding.scope = scope
-      binding.skills = undefined
-      this.bindSkills(binding, host.prompts.current())
-    })
-    binding.disposers.push(() => { skillScope.dispose().catch((error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release a skill scope: %s', String(error)) }) })
-    await skillScope
-    // Bail out if the agent was disposed while awaiting the skill scope.
-    if (this.bindings.get(agent) !== binding) return
+    if (!master) {
+      // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
+      // Bob (master) has no execution or skill tools, so runtime CLI skills are bound only to workers and business superagents.
+      const skillScope = agent.ctx.inject(['skills'], scope => {
+        binding.scope = scope
+        binding.skills = undefined
+        this.bindSkills(binding, host.prompts.current())
+      })
+      binding.disposers.push(() => { skillScope.dispose().catch((error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release a skill scope: %s', String(error)) }) })
+      await skillScope
+      // Bail out if the agent was disposed while awaiting the skill scope.
+      if (this.bindings.get(agent) !== binding) return
+    }
+    const ownTools = new Set<string>()
     const register = this.registerTool(agent, binding)
-    for (const tool of host.tools(agent, { ticket, superagent })) register(tool.name, tool.description, tool.schema, tool.execute)
+    for (const tool of host.tools(agent, { ticket, superagent })) {
+      ownTools.add(tool.name)
+      register(tool.name, tool.description, tool.schema, tool.execute)
+    }
     if (master) {
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
-        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
+      // Mask every inherited/preset execution tool (shell, files, jobs, skills, web, subagent, ...) even on pre-existing sessions;
+      // tools registered directly above on agent.ctx.tools (orchestrator_* and lead_team_*) remain available.
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: [] }),
+        agent.ctx.tools.guard(execution => ownTools.has(execution.name) ? undefined : DISPATCH_ONLY))
     } else if (superagent) {
       binding.disposers.push(...this.superagentOnly(agent, superagent.id))
     } else {
@@ -296,19 +284,6 @@ export class Sessions {
     return id === undefined ? undefined : this.host.store.team.superagents.get(id)
   }
   /**
-   * Whether a Session runs the router preset: as DSH's preset registry last selected it, read through the session projection
-   * on a DSH whose registry has no `presetForSession`, else as it was created; `standard`, the safer caps, when unreadable.
-   */
-  private routed(agent: Agent): boolean {
-    try {
-      const presets = this.ctx.get('agentPresets') as { presetForSession?: (session: Agent['session']) => string | null } | undefined
-      const projections = this.ctx.get('sessionProjections') as { stateOf?: (session: Agent['session'], key: string) => unknown } | undefined
-      const selected = typeof presets?.presetForSession === 'function' ? presets.presetForSession(agent.session)
-        : projections?.stateOf?.(agent.session, 'agentPreset')
-      return (selected ?? agent.session.header.agentPreset) === ROUTER_PRESET
-    } catch { return false }
-  }
-  /**
    * An Executor Session's tools: only the profile's work tools, which DSH requires to be known, and none once its ticket
    * ended. A failed or blocked worker keeps its tools, so a person may continue it in its Session; only automated input waits
    * (see the executor). Read inherited tools through the parent scope, which includes the preset's tools. The global view
@@ -331,7 +306,8 @@ export class Sessions {
     const store = this.host.store
     const parent = scopeParentOf(agent)
     const present = (name: string) => agent.ctx.tools.get(name) !== undefined || agent.ctx.tools.get(name, parent) !== undefined
-    const allow = [...WORK_TOOLS, 'superagent_team_report', 'superagent_team_message', 'superagent_team_read', 'superagent_delegate'].filter(present)
+    const allow = [...WORK_TOOLS, 'superagent_team_report', 'superagent_team_message', 'superagent_team_read', 'superagent_delegate',
+      'superagent_team_add_member', 'superagent_team_remove_member', 'superagent_team_propose', 'superagent_team_dispatch'].filter(present)
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(execution => {
       const member = store.team.superagents.get(superagentId)
       if (!member || !superagentActive(member)) return 'This superagent is disabled; new work waits until it is enabled'
@@ -340,7 +316,7 @@ export class Sessions {
       // Talk needs no task: an idle member still answers a message it was mentioned in, and reads the team, but can only
       // delegate while it has a task of its own.
       if (working || TALK_TOOLS.has(execution.name)) return undefined
-      return 'No team task is running; new work needs a task the lead proposed and dispatched. Answer a message with superagent_team_message.'
+      return 'No team task is running; new work needs a task the group owner proposed and dispatched. Answer a message with superagent_team_message.'
     })]
   }
   /**

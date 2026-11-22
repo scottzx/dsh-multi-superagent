@@ -277,10 +277,20 @@ export class Engine {
   }
   /** The person's identity, created once at startup so every group can include it. */
   ensureHuman(): Superagent { return this.repo.atomic(() => this.teams.ensureHuman()) }
-  /** The main Session's identity as a bot of the team, so the lead is a member of the groups it dispatches in. */
-  ensureLead(id: string, directory?: string): Superagent { return this.repo.atomic(() => this.teams.ensureLead(id, directory)) }
-  /** The standing all-hands group, which holds every bot, so the lead dispatches to anyone without building a group. */
+  /** Alice, the business superagent a deployment starts with. She joins the all-hands group and owns it until the owner changes. */
+  ensureAlice(directory?: string): Superagent { return this.repo.atomic(() => this.teams.ensureAlice(directory)) }
+  /** The standing all-hands group: every business superagent, not Bob. */
   ensureAllHands(): Team | undefined { return this.repo.atomic(() => this.teams.ensureAllHands()) }
+  /** Name a group's owner. The new owner is already a member. */
+  setTeamOwner(teamId: string, ownerId: string): Team { return this.repo.atomic(() => this.teams.setOwner(teamId, ownerId)) }
+  /** The owner adds a business superagent to a group other than all-hands. */
+  addTeamMember(teamId: string, by: string, memberId: string): Team { return this.repo.atomic(() => this.teams.addMember(teamId, by, memberId)) }
+  /** The owner removes a member other than themselves from a group other than all-hands. */
+  removeTeamMember(teamId: string, by: string, memberId: string): Team { return this.repo.atomic(() => this.teams.removeMember(teamId, by, memberId)) }
+  /** Dissolve a group. The all-hands group cannot be dissolved. */
+  dissolveTeam(teamId: string, summary: string): Team { return this.repo.atomic(() => this.teams.dissolve(teamId, summary)) }
+  /** Deliver a request to a group's owner. Bob does not join the group. */
+  handOffTeam(teamId: string, text: string): TeamMessage { return this.repo.atomic(() => this.teams.handOff(teamId, text)) }
   /** Whether `id` is the person, who runs no Session. */
   isHuman(id: string): boolean { return this.teams.isHuman(id) }
   /** A bot's mentions waiting for it, oldest first. */
@@ -346,13 +356,14 @@ export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelive
 /** What the SuperagentRunner reports back to the Engine about superagent turns. */
 export type EngineForSuperagentRunner = Pick<Engine, 'superagentStarted' | 'superagentDelivered' | 'superagentTurnEnded' | 'superagentFailed'
   | 'takeBatch' | 'deliverBatch' | 'inbox'>
-/** What the lead asks of the Engine, through its team tools: read the team, propose and dispatch a division, close a round. */
-export type EngineForLead = Pick<Engine, 'superagent' | 'superagents' | 'team' | 'openTeams' | 'tasks' | 'messages' | 'sendTeamMessage' | 'proposeTeam'
-  | 'dispatchTeam' | 'closeTeam' | 'delegateTeamWork' | 'addSuperagent' | 'updateSuperagent' | 'addTeam' | 'ensureAllHands'>
-/** What a specialist superagent asks of the Engine, through its team tools: its task, the team's talk, and delegation. */
-export type EngineForSpecialist = Pick<Engine, 'tasks' | 'messages' | 'sendTeamMessage' | 'reportTeamTask' | 'delegateTeamWork'>
-/** What the panel asks of the Engine for the team view: read the teams, speak in one, pause it, and close a round. */
-export type EngineForTeamPanel = Pick<Engine, 'openTeams' | 'team' | 'tasks' | 'messages' | 'closeTeam' | 'superagents'
-  | 'addSuperagent' | 'updateSuperagent' | 'sendTeamMessage' | 'addTeam' | 'pauseTeam' | 'resumeTeam' | 'inbox' | 'ensureAllHands'>
+/** What Bob asks of the Engine: hire, create a group, name its owner, hand the request over, and dissolve. He does not speak or dispatch. */
+export type EngineForLead = Pick<Engine, 'superagent' | 'superagents' | 'team' | 'openTeams' | 'tasks' | 'messages'
+  | 'addSuperagent' | 'updateSuperagent' | 'addTeam' | 'setTeamOwner' | 'dissolveTeam' | 'handOffTeam' | 'ensureAllHands'>
+/** What a business superagent asks of the Engine. The group's owner also adds and removes members and proposes its tasks. */
+export type EngineForSpecialist = Pick<Engine, 'tasks' | 'messages' | 'sendTeamMessage' | 'reportTeamTask' | 'delegateTeamWork'
+  | 'proposeTeam' | 'dispatchTeam' | 'addTeamMember' | 'removeTeamMember'>
+/** What the panel asks of the Engine for the team view: read the teams, speak in one, pause it, set its owner, and dissolve a group. */
+export type EngineForTeamPanel = Pick<Engine, 'openTeams' | 'team' | 'tasks' | 'messages' | 'dissolveTeam' | 'superagents'
+  | 'addSuperagent' | 'updateSuperagent' | 'sendTeamMessage' | 'addTeam' | 'setTeamOwner' | 'pauseTeam' | 'resumeTeam' | 'inbox' | 'ensureAllHands'>
 
 export type { TeamTask }

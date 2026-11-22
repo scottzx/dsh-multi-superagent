@@ -80,10 +80,19 @@ async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<un
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
 }
+const TAILNET_HOST = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.ts\.net(?::\d+)?$/i
 export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number): boolean {
+  if (req.headers['x-orchestrator-request'] !== '1') return false
   const host = req.headers.host
-  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
-  return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
+  if (!host) return false
+  const origin = req.headers.origin
+  if (host === `127.0.0.1:${port}` || host === `localhost:${port}`) {
+    return origin === undefined || origin === `http://${host}`
+  }
+  if (TAILNET_HOST.test(host) && (req.headers['tailscale-user-login'] !== undefined || req.headers['x-forwarded-proto'] === 'https')) {
+    return origin === undefined || origin === `https://${host}`
+  }
+  return false
 }
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
@@ -209,10 +218,13 @@ function routes(runtime: HttpHost): Routes {
     },
     'POST teams/:id/close': async ({ params, body }) => {
       const summary = z.object({ summary: z.string().trim().min(1).max(4000) }).parse(await body()).summary
-      const team = runtime.engine.team(params.id)
-      if (!team?.leadId) throw new RouteError(400, 'This team has no lead to close it')
-      runtime.engine.closeTeam(params.id, team.leadId, summary)
+      runtime.engine.dissolveTeam(params.id, summary)
       return { closed: true }
+    },
+    'POST teams/:id/owner': async ({ params, body }) => {
+      const ownerId = z.object({ owner_id: z.string().trim().min(1).max(200) }).parse(await body()).owner_id
+      const team = runtime.engine.setTeamOwner(params.id, ownerId)
+      return { owner_id: team.leadId ?? ownerId }
     },
     'POST teams/:id/message': async ({ params, body }) => {
       const args = z.object({ text: z.string().trim().min(1).max(4000), at: z.array(z.string().trim().min(1).max(200)).max(5).optional(),

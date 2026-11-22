@@ -231,14 +231,12 @@ export class Runtime extends Service implements SourceHost {
     this.superagentRunner.install()
     // The person is a member of every team it joins, so it must exist before a team is created or a message is sent.
     this.engine.ensureHuman()
-    // The main Session is the deployment's lead: a bot identity of its own, so it leads the standing all-hands group and the
-    // mentions that reach it arrive in its own Session.
-    this.engine.ensureLead(this.masterId, this.machine.stateDir)
-    this.engine.ensureAllHands()
+    // Alice is the default business superagent. Bob, the main Session, is not a member of any group, including all-hands.
+    this.engine.ensureAlice(join(this.machine.stateDir, 'specialists', 'alice'))
     // A persona registered before AGENTS.md existed is that superagent's brief. Seed it once, so dropping it from the prompt
     // does not leave an existing superagent without the identity it was given.
     for (const superagent of this.store.team.superagents.list()) if (superagent.role !== 'human') this.profiles.read(superagent)
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'Bob', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return

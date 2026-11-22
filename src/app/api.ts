@@ -39,6 +39,7 @@ export interface Api {
   'GET teams': { response: TeamListView }
   'GET teams/:id': { response: TeamDetailView }
   'POST teams/:id/close': { body: { summary: string }; response: { closed: boolean } }
+  'POST teams/:id/owner': { body: { owner_id: string }; response: { owner_id: string } }
   'POST teams/:id/message': { body: { text: string; at?: string[]; reply_to?: string }; response: { message_id: string; woke: string[] } }
   'GET teams/:id/messages': { query?: { after?: string; limit?: number }; response: TeamMessagesView }
   'POST teams/:id/pause': { body: { paused: boolean }; response: { paused: boolean } }

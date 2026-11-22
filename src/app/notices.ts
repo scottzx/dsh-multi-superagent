@@ -139,7 +139,7 @@ export function teamReportRelay(team: Pick<Team, 'id' | 'name'>, task: Pick<Team
   const report = { kind: 'team_report', team_id: team.id, team_name: team.name, task_id: task.id, assignee_id: task.assigneeId,
     task: task.text, state: task.state, ...summary ? { summary } : {}, ...task.outputs.length ? { outputs: task.outputs } : {},
     remaining, read: `team/${team.id}`,
-    note: remaining ? 'Other tasks of this round are still open. Do not relay a partial result and do not close the round. A later team_report arrives when the next task finishes.'
-      : 'Every task of this round is done or failed. Now relay the result to the person who asked, then close the round with lead_team_close. Do not start more work in this turn.' }
+    note: remaining ? 'Other tasks of this round are still open. Do not relay a partial result and do not dissolve the group. A later team_report arrives when the next task finishes.'
+      : 'Every task of this round is done or failed. Relay the result to the person who asked. The group stays open; dissolve it with lead_team_dissolve only when the person is done with the matter.' }
   return { id: `team-report:${task.id}:${task.state}`, text: JSON.stringify(report) }
 }

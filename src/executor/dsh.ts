@@ -818,14 +818,6 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     const batch = this.host.engine.takeBatch(botId)
     if (!batch) return
     const team = this.host.store.team.teams.get(batch.teams[0]!.teamId)
-    // The lead is the main Session, so a mention of it is queued there, alongside candidates and worker reports, rather than
-    // starting a second Session that would not have the lead's tools.
-    if (superagent.role === 'lead' && this.host.masterId) {
-      await this.host.sessions.prompt(this.host.masterId, `superagent-inbox:${batch.batchId}`, inboxMessage(batch, true), 'queue',
-        () => { if (this.host.closing()) throw new Error('dsh-superagent stopped before its inbox was delivered') })
-      this.host.engine.deliverBatch(botId, batch)
-      return
-    }
     const sessionId = superagentSessionId(botId)
     const workspace = superagentWorkspace(superagent, this.host.machine.stateDir)
     await this.host.sessions.ensure(sessionId, workspace, `${team?.name ?? botId} · ${botId}`, 'superagent')

@@ -2,6 +2,7 @@
  * Migrates a schema 10 database to schema 11 in a single transaction so runtime readers never convert legacy shapes.
  * Databases older than schema 10 are rejected: this version cannot migrate them. Schema 12 added the team tables and schema 13
  * the team inbox and cursors; both are additive, so an older database only gains them and needs no record conversion.
+ * Schema 14 removes the lead role: Bob is not a team member, and a former lead identity is dropped from the groups.
  */
 import { basename } from 'node:path'
 import { z } from 'zod'
@@ -18,7 +19,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 13
+export const SCHEMA_VERSION = 14
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -28,6 +29,32 @@ export const tooOld = (version: number): string =>
 type Stored = Record<string, unknown>
 const isObject = (value: unknown): value is Stored => !!value && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown): string | undefined => typeof value === 'string' && value ? value : undefined
+
+/**
+ * Drop the lead role. Bob is the orchestrator session and is not a member of any group; Chief was a second lead of that
+ * same session. Both identities leave the superagent table and every group's membership. A group whose owner was one of
+ * them keeps the first remaining business member as owner.
+ */
+export function migrateTo14(store: Store): void {
+  const dropped = new Set<string>()
+  for (const row of store.db.prepare('SELECT id, value FROM superagent').all() as { id: string; value: string }[]) {
+    const value = JSON.parse(row.value) as { role?: string }
+    if (row.id === 'chief' || value.role === 'lead' || row.id.startsWith('orchestrator-')) dropped.add(row.id)
+  }
+  for (const id of dropped) store.db.prepare('DELETE FROM superagent WHERE id = ?').run(id)
+  for (const row of store.db.prepare('SELECT id, value FROM team').all() as { id: string; value: string }[]) {
+    const team = JSON.parse(row.value) as { memberIds?: string[]; leadId?: string }
+    const memberIds = (team.memberIds ?? []).filter(id => !dropped.has(id))
+    if (team.leadId && !memberIds.includes(team.leadId)) {
+      // All-hands gets Alice at startup. Another group keeps its first remaining business superagent.
+      const owner = row.id === 'all-hands' ? undefined : memberIds.find(id => id !== 'me')
+      if (owner) team.leadId = owner
+      else delete team.leadId
+    }
+    team.memberIds = memberIds
+    store.db.prepare('UPDATE team SET value = ? WHERE id = ?').run(JSON.stringify(team), row.id)
+  }
+}
 
 /** Runs one migration step, prefixing any thrown error with the name of the record that failed. */
 function step<T>(record: string, work: () => T): T {

@@ -76,6 +76,9 @@ it('answers only a same-origin request from the panel on the loopback address', 
       body: { error: 'Same-origin management request required' } })
   }
   expect(await post({ host: 'localhost:3082', origin: 'http://localhost:3082' })).toMatchObject({ status: 200 })
+  // Tailscale Serve HTTPS proxy requests to the loopback host are allowed when same-origin.
+  expect(await post({ host: 'box.tail1234.ts.net:3082', origin: 'https://box.tail1234.ts.net:3082', 'x-forwarded-proto': 'https' })).toMatchObject({ status: 200 })
+  expect(await post({ host: 'box.tail1234.ts.net:3082', origin: 'https://evil.example', 'x-forwarded-proto': 'https' })).toMatchObject({ status: 403 })
   // Management routes require a loopback Web server.
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
 })
@@ -102,10 +105,11 @@ function chatRuntime() {
   const messages = [{ id: 'm1', teamId: 't1', from: 'me', text: 'hello', at: '2026-09-23T00:01:00Z', kind: 'discussion' }]
   const said: unknown[] = []
   const paused: unknown[] = []
+  const owners: unknown[] = []
   const runtime = {
     store: { team: {
       teams: { get: (id: string) => id === 't1' ? { id: 't1', name: 'T1', kind: 'group', memberIds: ['me', 'lead', 'a'], leadId: 'lead', createdAt: '' } : undefined },
-      superagents: { get: (id: string) => ({ me: { id: 'me', name: 'You', role: 'human' }, lead: { id: 'lead', name: 'Lead', role: 'lead' },
+      superagents: { get: (id: string) => ({ me: { id: 'me', name: 'You', role: 'human' }, lead: { id: 'lead', name: 'Lead', role: 'specialist' },
         a: { id: 'a', name: 'A', role: 'specialist' } })[id] },
       messages: { list: () => messages },
       tasks: { list: () => [] },
@@ -122,9 +126,10 @@ function chatRuntime() {
       pauseTeam: (id: string) => paused.push(id),
       resumeTeam: (id: string) => paused.pop(),
       addTeam: (team: { name: string }) => ({ id: `team-${team.name}` }),
+      setTeamOwner: (id: string, ownerId: string) => { owners.push({ id, ownerId }); return { leadId: ownerId } },
     },
   }
-  return { call: serve(runtime as never), said, paused }
+  return { call: serve(runtime as never), said, paused, owners }
 }
 
 it('lets the person speak in a group and wakes only the superagents it names', async () => {
@@ -153,4 +158,11 @@ it('pauses and resumes a group from the panel', async () => {
   expect(await call('POST', 'teams/t1/pause', { paused: true })).toMatchObject({ status: 200, body: { paused: true } })
   expect(paused).toEqual(['t1'])
   expect(await call('POST', 'teams/t1/pause', { paused: false })).toMatchObject({ status: 200, body: { paused: false } })
+})
+
+it('changes a group owner through POST teams/:id/owner', async () => {
+  const { call, owners } = chatRuntime()
+  expect(await call('POST', 'teams/t1/owner', { owner_id: 'a' })).toMatchObject({ status: 200, body: { owner_id: 'a' } })
+  expect(owners).toEqual([{ id: 't1', ownerId: 'a' }])
+  expect(await call('POST', 'teams/t1/owner', { owner_id: '' })).toMatchObject({ status: 400 })
 })

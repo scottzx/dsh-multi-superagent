@@ -68,13 +68,13 @@ const message = (id: string, actor: { source: string; id: string }, human = true
   threads: [{ source: 'feishu', id: 'oc_1:om_root' }], actor, human, at, text: `message ${id}`, meta: {} })
 
 it("carries each member's bound project directory into the team list and detail views", () => {
-  store.team.superagents.save({ id: 'lead', name: 'Lead', role: 'lead', createdAt: '' })
+  store.team.superagents.save({ id: 'lead', name: 'Lead', role: 'specialist', createdAt: '' })
   store.team.superagents.save({ id: 'a', name: 'A', role: 'specialist', directory: '/srv/copy', createdAt: '' })
   store.team.superagents.save({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
   store.team.teams.save({ id: 't1', name: 't1', kind: 'group', memberIds: ['lead', 'a', 'b'], leadId: 'lead', createdAt: '' })
   // A bound directory is shown; an unset one is left off the row.
   expect(teamList(store).teams[0]!.members).toEqual([
-    { id: 'lead', name: 'Lead', role: 'lead' },
+    { id: 'lead', name: 'Lead', role: 'specialist' },
     { id: 'a', name: 'A', role: 'specialist', directory: '/srv/copy' },
     { id: 'b', name: 'B', role: 'specialist' },
   ])

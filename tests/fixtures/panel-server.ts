@@ -51,7 +51,7 @@ export const threadSummary = (fields: Partial<ThreadRow> = {}): ThreadRow => ({
 })
 /** A team summary for the panel's team tab. */
 export const TEAM_SUMMARY = { id: 'team1', name: '文案团队', kind: 'group' as const, leadId: 'lead',
-  members: [{ id: 'lead', name: 'Lead', role: 'lead' }, { id: 'writer', name: 'Writer', role: 'specialist', directory: '/Users/scott/projects/copy' },
+  members: [{ id: 'lead', name: 'Lead', role: 'specialist' }, { id: 'writer', name: 'Writer', role: 'specialist', directory: '/Users/scott/projects/copy' },
     { id: 'a', name: 'Researcher', role: 'specialist' }],
   counts: { proposed: 1, waiting: 1, working: 1, done: 0, failed: 0 } }
 /** The team list the panel's team tab reads. */
@@ -376,13 +376,28 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
       closed: { at: '2026-09-23T00:02:00Z', by: detail.team.leadId ?? '', summary: body.summary } } : team) }
     return { closed: true }
   } },
+  'POST teams/:id/owner': { body: true, answer: ({ params, body }) => {
+    const detail = server.teamDetails[params.id]
+    if (!detail) return refuse(404, 'Team not found')
+    server.teamDetails[params.id] = { ...detail, team: { ...detail.team, leadId: body.owner_id } }
+    server.teams = { teams: server.teams.teams.map(team => team.id === params.id ? { ...team, leadId: body.owner_id } : team) }
+    return { owner_id: body.owner_id }
+  } },
   'POST teams/:id/message': { body: true, answer: ({ params, body }) => server.teamDetails[params.id]
     ? { message_id: `m-${params.id}`, woke: body.at ?? [] } : refuse(404, 'Team not found') },
   'GET teams/:id/messages': { answer: ({ params }) => server.teamDetails[params.id]
     ? { messages: server.teamDetails[params.id]!.messages } : refuse(404, 'Team not found') },
   'POST teams/:id/pause': { body: true, answer: ({ params, body }) => server.teamDetails[params.id]
     ? { paused: body.paused } : refuse(404, 'Team not found') },
-  'POST teams': { body: true, answer: ({ body }) => ({ team_id: `team-${server.teams.teams.length + 1}` }) },
+  'POST teams': { body: true, answer: ({ body }) => {
+    const id = `team-${server.teams.teams.length + 1}`
+    const members = body.member_ids.map(memberId => server.superagents.superagents.find(row => row.id === memberId) ?? { id: memberId, name: memberId, role: 'specialist' })
+    const summary = { id, name: body.name, kind: body.kind ?? 'group', members, ...body.lead_id ? { leadId: body.lead_id } : {},
+      counts: { proposed: 0, waiting: 0, working: 0, done: 0, failed: 0 } }
+    server.teams = { teams: [...server.teams.teams, summary] }
+    server.teamDetails[id] = { team: summary, tasks: [], messages: [], statuses: members.filter(m => m.role !== 'human').map(m => ({ id: m.id, state: 'idle', queued: 0 })) }
+    return { team_id: id }
+  } },
   'GET superagents': { answer: () => server.superagents },
   'GET superagents/:id/profile': { answer: ({ params }) => {
     const member = server.superagents.superagents.find(row => row.id === params.id)
@@ -406,9 +421,17 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { id: body.id }
   } },
   'POST superagents/:id': { body: true, answer: ({ params, body }) => {
-    server.superagents = { superagents: server.superagents.superagents.map(member => member.id === params.id
-      ? { ...member, ...body.name ? { name: body.name } : {}, ...body.disabled ? { disabled: { at: '2026-09-23T00:00:00Z', by: 'panel' } } : { disabled: undefined } }
-      : member) }
+    server.superagents = { superagents: server.superagents.superagents.map(member => {
+      if (member.id !== params.id) return member
+      const next = { ...member, ...body.name !== undefined ? { name: body.name } : {},
+        ...body.capabilities !== undefined ? { capabilities: body.capabilities ?? undefined } : {},
+        ...body.persona !== undefined ? { persona: body.persona ?? undefined } : {},
+        ...body.directory !== undefined ? { directory: body.directory ?? undefined } : {},
+        ...body.repository !== undefined ? { repository: body.repository ?? undefined } : {},
+        ...body.feishuCli !== undefined ? { feishuCli: body.feishuCli ?? undefined } : {},
+        ...body.disabled === undefined ? {} : { disabled: body.disabled ? { at: '2026-09-23T00:00:00Z', by: 'panel' } : undefined } }
+      return next
+    }) }
     return { id: params.id }
   } },
   'POST executor/pause': { body: true, answer: ({ body }) => {
