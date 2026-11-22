@@ -14,7 +14,7 @@ import { PageHead, Section, StageMark, When } from './widgets.tsx'
 const AVATAR_COLORS = ['#3b6ea5', '#2f7d6d', '#8a5a2b', '#7a4e8a', '#3f6f4e', '#8a4a4a', '#3e5f8a', '#6e6a32']
 const BOB_COLOR = '#1f3a5f'
 
-const TASK_MARKS: Record<TeamDetailView['tasks'][number]['state'],
+export const TASK_MARKS: Record<TeamDetailView['tasks'][number]['state'],
   { dot: 'idle' | 'warning' | 'ongoing' | 'done' | 'error'; icon: 'queue' | 'clock' | 'running' | 'decision' | 'alert' }> = {
   proposed: { dot: 'idle', icon: 'queue' },
   waiting: { dot: 'warning', icon: 'clock' },
@@ -257,12 +257,13 @@ function CreateTeam({ specialists, onCreated }: { specialists: SuperagentRow[]; 
   </>
 }
 
-function TeamLine({ team, onOpen }: { team: TeamSummary; onOpen: (id: string) => void }) {
+function TeamLine({ team, onOpen, onChat }: { team: TeamSummary; onOpen: (id: string) => void; onChat?: (id: string) => void }) {
   const { t } = usePanel()
   const busy = team.counts.working + team.counts.waiting + team.counts.proposed
   const bots = team.members.filter(member => member.role !== 'human')
   const ownerName = team.leadId ? (team.members.find(member => member.id === team.leadId)?.name ?? team.leadId) : undefined
   const standing = team.id === ALL_HANDS_ID
+  const primary = onChat ?? onOpen
   return <li className="dt-row dt-link dt-ticket" data-state={team.closed ? 'idle' : 'ongoing'}>
     <div className="dt-ticket-stage">
       <StageMark state={team.closed ? 'idle' : 'ongoing'} icon={team.closed ? 'decision' : 'running'}
@@ -270,7 +271,7 @@ function TeamLine({ team, onOpen }: { team: TeamSummary; onOpen: (id: string) =>
     </div>
     <div className="dt-ticket-body">
       <div className="dt-row-title">
-        <button type="button" className="dt-open" onClick={() => onOpen(team.id)}>{teamName(t, team)}</button>
+        <button type="button" className="dt-open" onClick={() => primary(team.id)}>{teamName(t, team)}</button>
         {standing && <Tag tone="info">{t('teamStanding')}</Tag>}
       </div>
       <div className="dt-row-meta dt-line">
@@ -283,6 +284,11 @@ function TeamLine({ team, onOpen }: { team: TeamSummary; onOpen: (id: string) =>
       </div>
       {standing && <p className="dt-hint">{t('teamAllHandsHint')}</p>}
     </div>
+    {onChat && <div className="dt-row-actions">
+      <Button variant="outline" size="sm" icon={<Icon name="message" size={13} />} onClick={() => onChat(team.id)}>
+        {t('groupOpenChat')}
+      </Button>
+    </div>}
   </li>
 }
 
@@ -308,7 +314,7 @@ function TeamTaskLine({ task }: { task: TeamDetailView['tasks'][number] }) {
   </li>
 }
 
-function ChangeOwner({ team, onChanged }: { team: TeamSummary; onChanged: () => void }) {
+export function ChangeOwner({ team, onChanged }: { team: TeamSummary; onChanged: () => void }) {
   const { t, call, notify } = usePanel()
   const candidates = team.members.filter(member => member.role !== 'human' && !member.disabled)
   const [open, setOpen] = useState(false)
@@ -337,7 +343,7 @@ function ChangeOwner({ team, onChanged }: { team: TeamSummary; onChanged: () => 
   </>
 }
 
-function CloseTeam({ teamId, onClosed }: { teamId: string; onClosed: () => void }) {
+export function CloseTeam({ teamId, onClosed }: { teamId: string; onClosed: () => void }) {
   const { t, call, notify } = usePanel()
   const [open, setOpen] = useState(false)
   const [summary, setSummary] = useState('')
@@ -358,7 +364,7 @@ function CloseTeam({ teamId, onClosed }: { teamId: string; onClosed: () => void 
   </>
 }
 
-function TeamHome() {
+function TeamHome({ openGroup }: { openGroup?: (id: string) => void }) {
   const { t, call, navigate } = usePanel()
   const teams = usePoll(() => call('GET teams'), [])
   const superagents = usePoll(() => call('GET superagents'), [])
@@ -374,7 +380,7 @@ function TeamHome() {
     <SpecialistsSection members={specialists} onReload={() => superagents.reload()} />
     <Section title={t('teamsTitle')} count={list.length} action={<CreateTeam specialists={specialists} onCreated={() => teams.reload()} />}>
       {list.length ? <ul className="dt-list dt-cards">{list.map(team => <TeamLine key={team.id} team={team}
-        onOpen={teamId => navigate({ page: 'team', id: teamId })} />)}</ul> : <p className="dt-hint">{t('teamsNone')}</p>}
+        onOpen={teamId => navigate({ page: 'team', id: teamId })} onChat={openGroup} />)}</ul> : <p className="dt-hint">{t('teamsNone')}</p>}
     </Section>
   </>
 }
@@ -417,6 +423,6 @@ function TeamDetail({ id }: { id: string }) {
 }
 
 /** The team tab: Bob (HR-orchestrator), business specialists, group list, or one group's tasks and chat. */
-export function TeamPage({ id }: { id?: string }) {
-  return id === undefined ? <TeamHome /> : <TeamDetail id={id} />
+export function TeamPage({ id, openGroup }: { id?: string; openGroup?: (id: string) => void }) {
+  return id === undefined ? <TeamHome openGroup={openGroup} /> : <TeamDetail id={id} />
 }

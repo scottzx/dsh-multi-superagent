@@ -1746,3 +1746,29 @@ it('keeps the Policy the main Session judges by in its prompt, after admission a
   expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
   expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
 })
+
+it('eagerly provisions specialist Sessions on startup and on creation, and falls back to the host default model when a role model is unavailable', async () => {
+  // Alice's Session is already created on startup before any direct turn or group mention.
+  expect(agents.has('superagent-alice')).toBe(true)
+  expect(controller.create.mock.calls.find(([options]) => (options as { sessionId: string }).sessionId === 'superagent-alice'))
+    .toEqual([expect.objectContaining({ sessionId: 'superagent-alice', agentPreset: 'dsh-superagent-superagent' })])
+
+  // Creating a specialist via HTTP immediately provisions its Session.
+  const post = async (path: string, body: unknown) => {
+    let status = 0, text = ''
+    const req = { method: 'POST', url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' },
+      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) } }
+    await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
+    return { status, body: JSON.parse(text) }
+  }
+  const created = await post('superagents', { id: 'design', name: 'Design', persona: 'Design specialist' })
+  expect(created).toEqual({ status: 200, body: { id: 'design' } })
+  expect(agents.has('superagent-design')).toBe(true)
+
+  // Creating a specialist via Bob's tool immediately provisions its Session, even if the configured executor model is retired.
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, model: { provider: 'retired-provider', model: 'gone' } } })
+  vi.mocked(services.llm as { resolveCallConfig: ReturnType<typeof vi.fn> }).resolveCallConfig.mockRejectedValueOnce(new Error('unknown provider retired-provider'))
+  await runTool(runtime.masterId, 'lead_team_create_superagent', { id: 'qa', name: 'QA' })
+  expect(agents.has('superagent-qa')).toBe(true)
+  expect(controller.rename).toHaveBeenCalledWith({ sessionId: 'superagent-qa', title: 'QA' })
+})

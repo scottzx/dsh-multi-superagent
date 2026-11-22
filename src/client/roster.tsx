@@ -9,7 +9,7 @@ import { usePoll } from './api.ts'
 import { Button, Input, Modal } from './controls.tsx'
 import { isViewing, usePresence, type Presence } from './presence.ts'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
-import { requestTeam } from './route.ts'
+import { requestGroupChat, requestTeam } from './route.ts'
 import { errorText, teamName } from './text.ts'
 
 const REQUESTS = new Set(['approval', 'plan-review', 'question'])
@@ -85,8 +85,9 @@ function useTick(source: { subscribe(listener: () => void): () => void } | undef
 }
 
 /** The HR-orchestrator, specialist, and group list that occupies the sidebar's session-browser seat. */
-export function Roster({ wide, sessions, status, openTeam }: {
+export function Roster({ wide, sessions, status, openTeam, openGroup, activeGroupId, inConversation = true }: {
   wide: boolean; sessions?: Pick<ISessions, 'list'>; status?: StatusSource; openTeam?: () => void
+  openGroup?: (id: string) => void; activeGroupId?: string; inConversation?: boolean
 }) {
   const { t, call, openSession, notify } = usePanel()
   useTick(sessions?.list)
@@ -132,20 +133,39 @@ export function Roster({ wide, sessions, status, openTeam }: {
       notify(error instanceof SessionNavigationError ? t('rosterOpenFailed') : error instanceof Error ? error.message : t('rosterOpenFailed'))
     })
   }
+  const openGroupChat = (teamId: string) => {
+    if (openGroup) { requestGroupChat(teamId); openGroup(teamId) }
+    else { requestTeam(teamId); openTeam?.() }
+  }
+  const bobActive = inConversation && (bobRow?.retainedBy?.mainView ?? 0) > 0
   if (!wide) return <div className="dt-roster dt-roster-rail" aria-label={t('superagentsTitle')}>
     <button type="button" className="dt-roster-mark dt-roster-mark-bob" title={`${t('bobName')} · ${t('bobRole')}`}
-      disabled={!masterId} onClick={openBob}>
+      data-active={bobActive ? 'true' : undefined} disabled={!masterId} onClick={openBob}>
       <Avatar name={t('bobName')} id="bob" presence={bobPresence} label={label(bobPresence)} bob />
     </button>
     {specialists.length > 0 && <span className="dt-roster-rail-sep" aria-hidden />}
-    {specialists.slice(0, 7).map(member => <button key={member.id} type="button" className="dt-roster-mark" title={member.name}
-      disabled={!!member.disabled} onClick={() => openMember(member)}>
-      <Avatar name={member.name} id={member.id} presence={presence[sessionId(member)] ?? 'idle'} label={label(presence[sessionId(member)] ?? 'idle')} />
-    </button>)}
+    {specialists.slice(0, 6).map(member => {
+      const id = sessionId(member)
+      const active = inConversation && (rowOf(sessions, id)?.retainedBy?.mainView ?? 0) > 0
+      return <button key={member.id} type="button" className="dt-roster-mark" title={member.name}
+        data-active={active ? 'true' : undefined} disabled={!!member.disabled} onClick={() => openMember(member)}>
+        <Avatar name={member.name} id={member.id} presence={presence[id] ?? 'idle'} label={label(presence[id] ?? 'idle')} />
+      </button>
+    })}
+    {groups.length > 0 && <span className="dt-roster-rail-sep" aria-hidden />}
+    {groups.slice(0, 5).map(team => {
+      const name = teamName(t, team)
+      const value = presence[`team:${team.id}`] ?? 'idle'
+      return <button key={team.id} type="button" className="dt-roster-mark" title={name}
+        data-active={activeGroupId === team.id ? 'true' : undefined} onClick={() => openGroupChat(team.id)}>
+        <Avatar name={name} id={team.id} presence={value} label={label(value)} />
+      </button>
+    })}
   </div>
   return <div className="dt-roster">
     <div className="dt-roster-head"><span>{t('rosterOrchestrator')}</span></div>
-    <button type="button" className="dt-roster-row dt-roster-bob" disabled={!masterId} title={t('bobSessionHint')} onClick={openBob}>
+    <button type="button" className="dt-roster-row dt-roster-bob" data-active={bobActive ? 'true' : undefined}
+      disabled={!masterId} title={t('bobSessionHint')} onClick={openBob}>
       <Avatar name={t('bobName')} id="bob" presence={bobPresence} label={label(bobPresence)} bob />
       <span className="dt-roster-copy">
         <span className="dt-roster-name">
@@ -163,8 +183,10 @@ export function Roster({ wide, sessions, status, openTeam }: {
     {specialists.length ? <ul className="dt-roster-list">{specialists.map(member => {
       const id = sessionId(member)
       const value = presence[id] ?? 'idle'
+      const active = inConversation && (rowOf(sessions, id)?.retainedBy?.mainView ?? 0) > 0
       return <li key={member.id}>
-        <button type="button" className="dt-roster-row" disabled={!!member.disabled} onClick={() => openMember(member)}>
+        <button type="button" className="dt-roster-row" data-active={active ? 'true' : undefined}
+          disabled={!!member.disabled} onClick={() => openMember(member)}>
           <Avatar name={member.name} id={member.id} presence={value} label={label(value)} />
           <span className="dt-roster-copy">
             <span className="dt-roster-name">
@@ -184,7 +206,8 @@ export function Roster({ wide, sessions, status, openTeam }: {
       const name = teamName(t, team)
       const bots = team.members.filter(member => member.role !== 'human')
       return <li key={team.id}>
-        <button type="button" className="dt-roster-row" onClick={() => { requestTeam(team.id); openTeam?.() }}>
+        <button type="button" className="dt-roster-row" data-active={activeGroupId === team.id ? 'true' : undefined}
+          onClick={() => openGroupChat(team.id)}>
           <Avatar name={name} id={team.id} presence={value} label={label(value)} />
           <span className="dt-roster-copy">
             <span className="dt-roster-name">{name}</span>

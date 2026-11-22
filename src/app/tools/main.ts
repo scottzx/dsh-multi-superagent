@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
-import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForLead, type EngineForMainSession, type EngineForPeople }
+import { UserError, followupOwners, key, reasonText, type Decision, type DecisionKind, type EngineForLead, type EngineForMainSession, type EngineForPeople, type Superagent }
   from '../../core/index.ts'
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
@@ -32,6 +32,8 @@ export interface MainToolsHost {
   /** Schedules a pass to carry out work queued by an Engine command (such as an Eval or ticket resume). */
   requestPass(): void
   sendReplies(): Promise<void>
+  /** Provision a specialist's workspace brief and DSH Session so it is immediately ready to open and receive messages. */
+  ensureSuperagentSession?(superagent: Superagent): Promise<void>
   /** Runs an Engine command initiated by the main Session without emitting self-notifications. */
   quietly<T>(run: () => T): T
 }
@@ -300,6 +302,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         return saved
       },
     }),
-    ...leadTeamTools({ engine: host.engine, store: host.store, leadId: host.leadId }),
+    ...leadTeamTools({ engine: host.engine, store: host.store, leadId: host.leadId,
+      ...host.ensureSuperagentSession ? { ensureSuperagentSession: host.ensureSuperagentSession } : {} }),
   ]
 }

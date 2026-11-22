@@ -748,7 +748,7 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     host.effects.handle('superagent-launch', payload => this.launch(payload), { limit: () => host.paused() ? 0 : 4, retry: [5000, 300_000] })
     host.effects.handle('superagent-delivery', payload => this.deliverTurn(payload), { limit: () => host.paused() ? 0 : 4, retry: [2000, 60_000], quiet: true })
     // One wake per member, retried at the debounce window: a burst of mentions settles into a single batch.
-    host.effects.handle('superagent-inbox', payload => this.wakeInbox(payload), { limit: () => host.paused() ? 0 : 8, retry: [INBOX_DEBOUNCE_MS, 60_000], quiet: true })
+    host.effects.handle('superagent-inbox', payload => this.wakeInbox(payload), { limit: () => host.paused() ? 0 : 8, retry: [INBOX_DEBOUNCE_MS, 60_000] })
   }
   /** Enqueues a `superagent-launch` effect to start a superagent's turn on a team task. */
   start(team: Team, task: TeamTask): void { this.host.effects.enqueue('superagent-launch', task.id, { teamId: team.id, taskId: task.id }) }
@@ -773,8 +773,9 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     if (!team || !task || task.teamId !== teamId || task.state !== 'working' || !task.turn || task.turn.state !== 'pending') return
     const sessionId = superagentSessionId(task.assigneeId)
     // The superagent's own project directory when the lead bound one; otherwise the shared state directory.
-    const workspace = superagentWorkspace(this.host.store.team.superagents.get(task.assigneeId), this.host.machine.stateDir)
-    await this.host.sessions.ensure(sessionId, workspace, `${team.name} · ${task.assigneeId}`, 'superagent')
+    const superagent = this.host.store.team.superagents.get(task.assigneeId)
+    const workspace = superagentWorkspace(superagent, this.host.machine.stateDir)
+    await this.host.sessions.ensure(sessionId, workspace, superagent?.name ?? task.assigneeId, 'superagent')
     const messages = this.host.store.team.messages.list(teamId)
     const others = this.host.store.team.tasks.list(teamId).filter(item => item.id !== task.id)
     await this.host.sessions.prompt(sessionId, `superagent-task:${task.id}`, superagentTaskMessage(team, task, messages, others), 'queue',
@@ -791,8 +792,9 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     if (!messages.length) return
     const sessionId = superagentSessionId(task.assigneeId)
     // A superagent keeps its bound project directory across deliveries, or the shared state directory when unbound.
-    const workspace = superagentWorkspace(this.host.store.team.superagents.get(task.assigneeId), this.host.machine.stateDir)
-    if (!this.host.context.agents.get(sessionId as SessionId)) await this.host.sessions.ensure(sessionId, workspace, `${team.name} · ${task.assigneeId}`, 'superagent')
+    const superagent = this.host.store.team.superagents.get(task.assigneeId)
+    const workspace = superagentWorkspace(superagent, this.host.machine.stateDir)
+    if (!this.host.context.agents.get(sessionId as SessionId)) await this.host.sessions.ensure(sessionId, workspace, superagent?.name ?? task.assigneeId, 'superagent')
     await this.host.sessions.prompt(sessionId, `superagent-deliver:${task.id}:${messages.at(-1)!.id}`,
       messages.map(message => `${message.from}: ${message.text}`).join('\n'), 'steer')
     this.host.engine.superagentDelivered(teamId, taskId)
@@ -817,10 +819,9 @@ export class SuperagentRunnerImpl implements SuperagentRunner {
     if (Date.now() - Date.parse(first.at) < INBOX_DEBOUNCE_MS) throw new Later('Waiting for mentions to settle')
     const batch = this.host.engine.takeBatch(botId)
     if (!batch) return
-    const team = this.host.store.team.teams.get(batch.teams[0]!.teamId)
     const sessionId = superagentSessionId(botId)
     const workspace = superagentWorkspace(superagent, this.host.machine.stateDir)
-    await this.host.sessions.ensure(sessionId, workspace, `${team?.name ?? botId} · ${botId}`, 'superagent')
+    await this.host.sessions.ensure(sessionId, workspace, superagent.name, 'superagent')
     await this.host.sessions.prompt(sessionId, `superagent-inbox:${batch.batchId}`, inboxMessage(batch), 'queue',
       () => { if (this.host.closing()) throw new Error('dsh-superagent stopped before its inbox was delivered') })
     this.host.engine.deliverBatch(botId, batch)

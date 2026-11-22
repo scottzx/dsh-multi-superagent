@@ -50,8 +50,11 @@ export function parseRoute(value: unknown): Route | undefined {
 }
 
 const ROUTE_KEY = 'dsh-superagent/route'
-/** The sidebar asks the panel to open one team conversation. The panel may not be mounted yet, so the route is stored too. */
+const GROUP_KEY = 'dsh-superagent/group'
+/** The sidebar asks the panel to open one team conversation in the management panel. */
 export const TEAM_OPEN = 'dsh-superagent:open-team'
+/** Opens one group conversation in the dedicated Group Chat main panel without disturbing settings/management routes. */
+export const GROUP_OPEN = 'dsh-superagent:open-group'
 export function requestTeam(id: string): void {
   try {
     const stored = JSON.parse(sessionStorage.getItem(ROUTE_KEY) ?? 'null') as { stack?: unknown; group?: unknown } | null
@@ -59,6 +62,13 @@ export function requestTeam(id: string): void {
       stack: Array.isArray(stored?.stack) ? stored.stack : [], ...stored?.group ? { group: stored.group } : {} }))
   } catch { /* Route memory is a convenience. */ }
   window.dispatchEvent(new CustomEvent(TEAM_OPEN, { detail: id }))
+}
+export function currentGroupChat(): string | undefined {
+  try { return sessionStorage.getItem(GROUP_KEY) || undefined } catch { return undefined }
+}
+export function requestGroupChat(id: string): void {
+  try { sessionStorage.setItem(GROUP_KEY, id) } catch { /* Group memory is a convenience. */ }
+  window.dispatchEvent(new CustomEvent(GROUP_OPEN, { detail: id }))
 }
 export interface Location { route: Route; stack: Route[]; group?: SettingsGroup | undefined }
 export const lastSettingsGroup = ({ route, group }: Location): SettingsGroup => route.page === 'settings' ? route.query.group

@@ -3,7 +3,7 @@ import { act, useState, type ComponentType } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ApiError, caller, usePoll } from '../src/client/api.ts'
-import { apply } from '../src/client/index.tsx'
+import { GROUP_PANEL_ID, apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
 import { keepMark, presenceOf, presenceStore } from '../src/client/presence.ts'
 import { SettingsSchema } from '../src/policy.ts'
@@ -22,12 +22,13 @@ function fixture(listed: string[]) {
     effect: (effect: () => unknown) => { effect() },
     sessions: { list: { getSnapshot: () => ({ phase: 'ready', byId: Object.fromEntries(listed.map(id => [id, {}])) }), subscribe: () => () => {} }, refresh: vi.fn(async () => {}) },
     uiWorkspace: { openSession: vi.fn() },
-    // Omit config form service so Deployment renders read-only.
-    get: () => undefined,
+    // Omit config form service so Deployment renders read-only; expose a mock layout service for panel selection.
+    get: (name: string) => name === 'layout' ? layout : undefined,
   }
+  const layout = { selectPanel: vi.fn(), panelInfo: { getSnapshot: () => ({ activePanelId: null }), subscribe: () => () => {} } }
   apply(ctx as never)
-  const entry = (name: string) => entries.find(item => item.options.name === name)!
-  return { ctx, entries, dictionaries, main: entry('main'), nav: entry('sidebar.panellist') }
+  const entry = (name: string, key?: string) => entries.find(item => item.options.name === name && (key === undefined || item.options.key === key))!
+  return { ctx, layout, entries, dictionaries, main: entry('main', 'dsh-superagent'), groupMain: entry('main', GROUP_PANEL_ID), nav: entry('sidebar.panellist') }
 }
 async function render(entry: Entry, props: Record<string, unknown>) {
   const container = document.createElement('div'); document.body.append(container)
@@ -62,12 +63,13 @@ it('keeps done until the conversation is opened, and a request outranks work', (
   presenceStore(undefined)
 })
 
-it('registers a localized main panel, sidebar entry and Plugin Manager row page, and no settings section', () => {
-  const { entries, dictionaries, main, nav } = fixture([])
-  expect(entries.map(entry => entry.options.name)).toEqual(['main', 'sidebar.panellist', 'plugins.row.config', 'sidebar.workspaces'])
-  expect(entries[2]!.options).toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
+it('registers the management panel, dedicated group chat panel, sidebar entry and Plugin Manager row page, and no settings section', () => {
+  const { entries, dictionaries, main, groupMain, nav } = fixture([])
+  expect(entries.map(entry => entry.options.name)).toEqual(['main', 'main', 'sidebar.panellist', 'plugins.row.config', 'sidebar.workspaces'])
+  expect(entries[3]!.options).toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
   expect(Object.keys(dictionaries)).toEqual(['dshSuperagent'])
   expect(main.options).toMatchObject({ key: 'dsh-superagent', locale: 'dshSuperagent' })
+  expect(groupMain.options).toMatchObject({ key: GROUP_PANEL_ID, locale: 'dshSuperagent' })
   expect(nav.options).toMatchObject({ id: 'dsh-superagent', order: 10, locale: 'dshSuperagent' })
   expect(nav.options.label?.()).toBe('Superagent')
 })
@@ -191,4 +193,76 @@ it('pins Bob (HR-orchestrator) in the sidebar roster in both wide and rail modes
   expect(railBob).not.toBeNull()
   expect(railBob?.title).toContain(zh.bobName)
   rail.dispose()
+})
+
+it('opens group chats in a dedicated direct-chat-style panel separate from settings tabs', async () => {
+  const posted: { path: string; body: unknown }[] = []
+  const team = { id: 'all-hands', name: 'All-hands', kind: 'group', leadId: 'alice',
+    members: [{ id: 'me', name: 'You', role: 'human' }, { id: 'alice', name: 'Alice', role: 'specialist', builtin: true }],
+    counts: { proposed: 0, waiting: 0, working: 1, done: 0, failed: 0 } }
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    const path = new URL(url, 'http://127.0.0.1').pathname.replace('/orchestrator/api/', '')
+    if (init?.method === 'POST') {
+      posted.push({ path, body: init.body ? JSON.parse(String(init.body)) : undefined })
+      return Response.json({ ok: true })
+    }
+    if (path === 'state') return Response.json({ masterId: 'master', superagents: [{ id: 'alice', name: 'Alice', role: 'specialist', builtin: true }],
+      settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
+      setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
+    if (path === 'superagents') return Response.json({ superagents: team.members })
+    if (path === 'teams') return Response.json({ teams: [team] })
+    if (path === 'teams/all-hands') return Response.json({
+      team,
+      tasks: [{ id: 't1', assigneeId: 'alice', assigneeName: 'Alice', text: '准备方案', state: 'working', after: [], outputs: [], createdAt: '2026-09-23T00:00:00Z' }],
+      messages: [
+        { id: 'm1', from: 'me', fromName: 'You', text: '大家好', at: '2026-09-23T00:00:00Z', kind: 'discussion' },
+        { id: 'm2', from: 'alice', fromName: 'Alice', text: '收到，我来跟进。', at: '2026-09-23T00:01:00Z', kind: 'discussion', replyTo: 'm1' },
+      ],
+      statuses: [{ id: 'alice', state: 'working', queued: 0 }],
+    })
+    return Response.json({ error: 'unavailable' }, { status: 503 })
+  }))
+  const { ctx, layout, entries, groupMain } = fixture(['master', 'superagent-alice'])
+  const workspaces = entries.find(entry => entry.options.name === 'sidebar.workspaces')!
+  const roster = await render(workspaces, { wide: true })
+  const groupRow = [...roster.container.querySelectorAll<HTMLButtonElement>('.dt-roster-row')].find(btn => btn.textContent?.includes(zh.teamAllHands))!
+  expect(groupRow).toBeDefined()
+  await act(async () => { groupRow.click() })
+  expect(layout.selectPanel).toHaveBeenCalledWith(GROUP_PANEL_ID)
+  roster.dispose()
+
+  const chat = await render(groupMain, { t })
+  // Completely separate from the management/settings panel: no tablist!
+  expect(chat.container.querySelector('[role="tablist"]')).toBeNull()
+  expect(chat.container.querySelector('.dt-gc-title')?.textContent).toBe(zh.teamAllHands)
+  expect(chat.container.textContent).toContain('收到，我来跟进。')
+
+  // Open mention picker, select Alice, type and send a message.
+  const mentionBtn = chat.container.querySelector<HTMLButtonElement>('.dt-gc-tool-btn')!
+  await act(async () => { mentionBtn.click() })
+  const option = chat.container.querySelector<HTMLButtonElement>('.dt-gc-picker-row')!
+  await act(async () => { option.click() })
+  expect(chat.container.querySelectorAll('.dt-gc-composer .dt-gc-at-chip')).toHaveLength(1)
+  const textarea = chat.container.querySelector<HTMLTextAreaElement>('.dt-gc-textarea')!
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+  await act(async () => {
+    setter.call(textarea, '看一下这个需求')
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  const sendBtn = chat.container.querySelector<HTMLButtonElement>('.dt-gc-send')!
+  await act(async () => { sendBtn.click() })
+  for (let i = 0; i < 4; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  expect(posted.find(req => req.path === 'teams/all-hands/message')?.body).toEqual({ text: '看一下这个需求', at: ['alice'] })
+
+  // Toggle right info drawer: shows members, tasks, and opens Alice's direct chat.
+  expect(chat.container.querySelector('.dt-gc-drawer')).toBeNull()
+  const toggle = chat.container.querySelector<HTMLButtonElement>('.dt-gc-drawer-toggle')!
+  await act(async () => { toggle.click() })
+  expect(chat.container.querySelector('.dt-gc-drawer')?.textContent).toContain('准备方案')
+  const directBtn = [...chat.container.querySelectorAll<HTMLButtonElement>('.dt-gc-drawer button')]
+    .find(btn => btn.textContent?.includes(zh.groupDirectChat))!
+  await act(async () => { directBtn.click() })
+  for (let i = 0; i < 4; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  expect(ctx.uiWorkspace.openSession).toHaveBeenCalledWith('superagent-alice')
+  chat.dispose()
 })

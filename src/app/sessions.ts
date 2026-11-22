@@ -130,7 +130,14 @@ export class Sessions {
     }
     if ('error' in result) throw result.error
     const settings = this.host.store.settings()
-    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
+    const model = role === 'orchestrator' ? settings.eval.model : settings.executor.model
+    try {
+      await initializeRoleModel(ctx, result.agent, model)
+    } catch (error) {
+      // Fall back to DSH's default model rather than leaving a newly created Session half-initialized and undeliverable.
+      ctx.logger.warn('dsh-superagent: configured %s model (%s/%s) is unavailable, falling back to DSH default: %s',
+        role, model?.provider ?? '', model?.model ?? '', String(error))
+    }
     await this.decorate(result.agent)
     ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })

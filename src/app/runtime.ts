@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, key, reasonText, superagentActive, superagentWorkspace, type EngineForSettings, type ReceiveResult, type Superagent, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -182,6 +182,7 @@ export class Runtime extends Service implements SourceHost {
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources, leadId: masterId,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
+        ensureSuperagentSession: superagent => this.ensureSuperagentSession(superagent),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
     } catch (error) {
@@ -215,6 +216,14 @@ export class Runtime extends Service implements SourceHost {
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
+  /** Provision a specialist's workspace brief and DSH Session so it can open and receive messages immediately. */
+  async ensureSuperagentSession(superagent: Superagent): Promise<void> {
+    if (superagent.role === 'human' || !superagentActive(superagent)) return
+    this.profiles.read(superagent)
+    if (!this.configured() || this.closing()) return
+    const workspace = superagentWorkspace(superagent, this.machine.stateDir)
+    await this.sessions.ensure(superagentSessionId(superagent.id), workspace, superagent.name, 'superagent')
+  }
   private closing(): boolean { return this.closingFlag }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
   private paused(): boolean { return !this.setup.configured() || this.store.settings().paused }
@@ -237,6 +246,12 @@ export class Runtime extends Service implements SourceHost {
     // does not leave an existing superagent without the identity it was given.
     for (const superagent of this.store.team.superagents.list()) if (superagent.role !== 'human') this.profiles.read(superagent)
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'Bob', 'orchestrator')
+    for (const superagent of this.store.team.superagents.list()) {
+      if (superagent.role === 'human' || !superagentActive(superagent)) continue
+      try { await this.ensureSuperagentSession(superagent) } catch (error) {
+        this.ctx.logger.warn('dsh-superagent could not initialize superagent %s session: %s', superagent.id, String(error))
+      }
+    }
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
@@ -253,7 +268,9 @@ export class Runtime extends Service implements SourceHost {
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
-      checkSetup: () => { setup.check() }, restart: () => { setup.restart() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
+      checkSetup: () => { setup.check() }, restart: () => { setup.restart() }, requestPass: () => { passes.request() },
+      ensureSuperagentSession: superagent => runtime.ensureSuperagentSession(superagent),
+      models: () => this.ctx.sessionController.modelCatalog() }
   }
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }

@@ -8,6 +8,8 @@
 .dt-roster-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .dt-roster-row { box-sizing: border-box; width: 100%; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 8px; background: none; padding: 6px 8px; text-align: left; color: inherit; cursor: pointer; transition: background 120ms ease; }
 .dt-roster-row:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.dt-roster-row[data-active='true'] { background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-interactive-bg-hover)); font-weight: 600; }
+.dt-roster-mark[data-active='true'] .dt-roster-avatar { box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #2f6feb); }
 .dt-roster-row:disabled { cursor: default; opacity: 0.5; }
 .dt-roster-bob { border: 0.5px solid var(--dsw-alias-border-l3, rgba(0, 0, 0, 0.08)); background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02)); padding: 8px; }
 .dt-roster-bob:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); border-color: var(--dsw-alias-border-l4, rgba(0, 0, 0, 0.14)); }

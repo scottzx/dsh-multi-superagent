@@ -11,7 +11,7 @@ import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, b
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
-import { HUMAN_ID, UserError, type EngineForPeople, type EngineForTeamPanel, type Ticket } from '../core/index.ts'
+import { HUMAN_ID, UserError, superagentActive, type EngineForPeople, type EngineForTeamPanel, type Superagent, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
 import type { Health } from '../sources/host.ts'
@@ -60,6 +60,8 @@ export interface HttpHost {
   /** Restart so a specialist's new Feishu CLI is resolved. GitHub repositories are read on the next poll and need no restart. */
   restart(): void
   requestPass(): void
+  /** Provision a specialist's workspace brief and DSH Session so it can open and receive messages immediately. */
+  ensureSuperagentSession?(superagent: Superagent): Promise<void>
   models(): Promise<ModelCatalog>
 }
 /**
@@ -290,6 +292,7 @@ function routes(runtime: HttpHost): Routes {
         ...args.capabilities ? { capabilities: args.capabilities } : {}, ...args.persona ? { persona: args.persona } : {},
         ...args.directory ? { directory: args.directory } : {}, ...args.repository ? { repository: args.repository } : {},
         ...args.feishuCli ? { feishuCli: args.feishuCli } : {} })
+      await runtime.ensureSuperagentSession?.(superagent)
       return { id: superagent.id }
     },
     'POST superagents/:id': async ({ params, body }) => {
@@ -306,6 +309,7 @@ function routes(runtime: HttpHost): Routes {
         ...args.repository !== undefined ? { repository: args.repository || null } : {},
         ...args.feishuCli !== undefined ? { feishuCli: args.feishuCli || null } : {},
         ...args.disabled === undefined ? {} : { disabled: args.disabled ? { at: new Date().toISOString(), by: 'panel' } : null } })
+      if (superagentActive(superagent)) await runtime.ensureSuperagentSession?.(superagent)
       if (args.feishuCli !== undefined && (args.feishuCli || undefined) !== before) runtime.restart()
       return { id: superagent.id }
     },

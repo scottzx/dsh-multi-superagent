@@ -136,13 +136,17 @@ describe('the team of superagents', () => {
     expect(() => engine.sendTeamMessage('t1', 'ghost', 'nope', 'discussion')).toThrow(UserError)
   })
 
-  it('lets only the owner speak, add and remove members, and hands a request to the owner without joining', () => {
+  it('lets any active group member speak, keeps member management owner-only, and hands a request to the owner without joining', () => {
     const { engine } = harness()
     engine.addSuperagent({ id: 'chief', name: 'Chief', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'a', name: 'A', role: 'specialist', createdAt: '' })
     engine.addSuperagent({ id: 'b', name: 'B', role: 'specialist', createdAt: '' })
     engine.addTeam(team('t1', ['chief', 'a']))
-    expect(() => engine.sendTeamMessage('t1', 'a', 'hi', 'discussion')).toThrow(UserError)
+    // Any active member may speak in a regular group or in all-hands; non-members still cannot.
+    engine.sendTeamMessage('t1', 'a', 'hi from member', 'discussion')
+    expect(engine.messages('t1').at(-1)).toMatchObject({ from: 'a', text: 'hi from member' })
+    engine.sendTeamMessage(ALL_HANDS_ID, 'a', 'hello all-hands', 'discussion')
+    expect(engine.messages(ALL_HANDS_ID).at(-1)).toMatchObject({ from: 'a', text: 'hello all-hands' })
     expect(() => engine.sendTeamMessage('t1', 'bob', 'hi', 'discussion')).toThrow(UserError)
     engine.sendTeamMessage('t1', 'chief', 'hi', 'discussion')
     expect(engine.messages('t1').at(-1)).toMatchObject({ from: 'chief', text: 'hi' })
@@ -150,9 +154,13 @@ describe('the team of superagents', () => {
     expect(engine.addTeamMember('t1', 'chief', 'b').memberIds).toContain('b')
     expect(() => engine.removeTeamMember('t1', 'chief', 'chief')).toThrow(UserError)
     expect(engine.removeTeamMember('t1', 'chief', 'a').memberIds).not.toContain('a')
+    expect(() => engine.sendTeamMessage('t1', 'a', 'removed', 'discussion')).toThrow(UserError)
     expect(() => engine.addTeamMember(ALL_HANDS_ID, 'chief', 'b')).toThrow(UserError)
     engine.setTeamOwner('t1', 'b')
-    expect(() => engine.sendTeamMessage('t1', 'chief', 'still mine', 'discussion')).toThrow(UserError)
+    // Previous owner remains a member so it can still speak, but can no longer manage members.
+    engine.sendTeamMessage('t1', 'chief', 'still a member', 'discussion')
+    expect(engine.messages('t1').at(-1)).toMatchObject({ from: 'chief', text: 'still a member' })
+    expect(() => engine.addTeamMember('t1', 'chief', 'a')).toThrow(UserError)
     const handed = engine.handOffTeam('t1', 'please revise the resume')
     expect(handed.mentions).toEqual(['b'])
     expect(engine.inbox('b', 'pending').map(item => item.messageId)).toEqual([handed.id])
@@ -204,12 +212,14 @@ describe('the team of superagents', () => {
     expect(wake).toHaveBeenCalledWith('a')
     expect(engine.tasks('t1')).toEqual([])
     expect(engine.inbox('a').map(item => item.botId)).toEqual(['a'])
-    // Only the group's owner may speak in it. A member's reply is refused, and wakes nobody.
-    expect(() => engine.sendTeamMessage('t1', 'a', 'back', 'discussion', { mentions: ['lead'] })).toThrow(UserError)
-    expect(wake).toHaveBeenCalledTimes(1)
+    // Any active group member may reply and wake the members it mentions.
+    engine.sendTeamMessage('t1', 'a', 'back', 'discussion', { mentions: ['lead'] })
+    expect(wake).toHaveBeenCalledTimes(2)
+    expect(wake).toHaveBeenLastCalledWith('lead')
     engine.updateSuperagent('b', { disabled: { at: '2026-09-23T00:00:00.000Z', by: 'lead' } })
     expect(() => engine.sendTeamMessage('t1', 'lead', 'still there', 'discussion', { mentions: ['b'] })).toThrow(UserError)
-    expect(wake).toHaveBeenCalledTimes(1)
+    expect(() => engine.sendTeamMessage('t1', 'b', 'from disabled', 'discussion')).toThrow(UserError)
+    expect(wake).toHaveBeenCalledTimes(2)
   })
   it('rejects a mention of a non-member, of the sender, or of more than five members', () => {
     const { engine } = harness()

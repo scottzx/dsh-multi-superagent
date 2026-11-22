@@ -1,6 +1,6 @@
 /** Team tools: the lead proposes, dispatches and closes a division; a specialist reports, talks and delegates. */
 import { z } from 'zod'
-import { ALICE_ID, ALL_HANDS_ID, UserError, type EngineForLead, type EngineForSpecialist, type Superagent } from '../../core/index.ts'
+import { ALICE_ID, ALL_HANDS_ID, UserError, superagentActive, type EngineForLead, type EngineForSpecialist, type Superagent } from '../../core/index.ts'
 import type { Store } from '../store.ts'
 import { tool, type Tool } from './tool.ts'
 
@@ -10,6 +10,8 @@ export interface LeadTeamToolsHost {
   readonly store: Pick<Store, 'team'>
   /** The superagent identity of the main Session, which is the team's lead. */
   readonly leadId: string
+  /** Provision a specialist's workspace brief and DSH Session so it is immediately ready to open and receive messages. */
+  ensureSuperagentSession?(superagent: Superagent): Promise<void>
 }
 /** A specialist superagent's team tools read its task and the team through the Engine. */
 export interface SuperagentToolsHost {
@@ -67,6 +69,7 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
           ...args.persona ? { persona: args.persona } : {}, ...args.skills ? { skills: args.skills } : {},
           ...args.directory ? { directory: args.directory } : {}, ...args.repository ? { repository: args.repository } : {},
           ...args.feishu_cli ? { feishuCli: args.feishu_cli } : {}, createdAt: '' })
+        await host.ensureSuperagentSession?.(superagent)
         const allHands = engine.team(ALL_HANDS_ID)
         return { superagent, ...allHands ? { all_hands: { id: allHands.id, name: allHands.name, lead_id: allHands.leadId } } : {} }
       },
@@ -94,6 +97,7 @@ export function leadTeamTools(host: LeadTeamToolsHost): Tool[] {
           ...args.repository !== undefined ? { repository: args.repository || null } : {},
           ...args.feishu_cli !== undefined ? { feishuCli: args.feishu_cli || null } : {},
           ...args.disabled === undefined ? {} : { disabled: args.disabled ? { at: new Date().toISOString(), by: leadId } : null } })
+        if (superagentActive(superagent)) await host.ensureSuperagentSession?.(superagent)
         return { superagent }
       },
     }),
@@ -166,7 +170,7 @@ export function superagentTools(host: SuperagentToolsHost): Tool[] {
     }),
     tool({
       name: 'superagent_team_message',
-      description: 'Say something in a direct conversation, or in a group you own. A group message from anyone else is refused. Only `at` wakes anyone. Never name yourself.',
+      description: 'Say something in a group or direct conversation you belong to. Only `at` wakes anyone. Never name yourself.',
       schema: z.object({ team_id: MemberSchema, text: z.string().trim().min(1).max(4000), at: MentionSchema.optional() }).strict(),
       execute: async args => {
         const message = engine.sendTeamMessage(args.team_id, superagent.id, args.text, 'discussion', { ...args.at ? { mentions: args.at } : {} })

@@ -17,7 +17,7 @@ export const HUMAN_ID = 'me'
 /** The name the standing all-hands group is stored under; the panel shows its own wording for it. */
 export const ALL_HANDS_NAME = 'All-hands'
 /** Who Alice is until someone renames her. Bob hires everyone else; she is already here. */
-const ALICE_PERSONA = '你是 Alice，本部署默认的业务 superagent，和之后招募的业务成员同一位置。Bob 建群并把一件事交给群主；你当群主时负责加人、踢人、在群里说话、派任务。你不能建群，也不能解散群。'
+const ALICE_PERSONA = '你是 Alice，本部署默认的业务 superagent，和之后招募的业务成员同一位置。Bob 建群并把一件事交给群主；你在任何所在群里都可以发言，当群主时还负责加人、踢人、拆任务和派任务。你不能建群，也不能解散群。'
 
 /**
  * The `Teams` part owns the team of superagents.
@@ -282,8 +282,8 @@ export class Teams extends EnginePart {
     const team = reopened
     if (!openTeam(team)) throw new UserError('teamClosed')
     if (!team.memberIds.includes(from)) throw new UserError('notAMember', { member: from })
-    // A group message is the owner's. A direct conversation has no owner, and the person may speak in either.
-    if (team.kind === 'group' && !this.isHuman(from) && from !== team.leadId) throw new UserError('notGroupOwner')
+    const sender = this.superagent(from)
+    if (sender && !superagentActive(sender)) throw new UserError('superagentDisabled', { superagent: from })
     const mentions = this.checkedMentions(team, from, options.mentions ?? [])
     if (options.replyTo !== undefined && !this.messages(teamId).some(message => message.id === options.replyTo)) {
       throw new UserError('unknownMessage', { message: options.replyTo })

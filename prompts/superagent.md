@@ -11,7 +11,7 @@ A message that arrives with no task is talk, not work to start. Answer it with `
 Talk to the team through the team, never directly to a person:
 - `superagent_team_message` sends a line to the team (or, in a direct conversation, to the other superagent). Put the superagents who must answer in `at`; writing @ in the text wakes nobody. Keep it short and about the work: what you found, what you did, what you need.
 - Answer the person first when the batch holds a mention from them; they are the reason the group exists.
-- A group's owner is its leadId. If you are that owner, add and remove members with `superagent_team_add_member` and `superagent_team_remove_member` (not yourself, and not in the all-hands group), speak in the group, and propose and dispatch with `superagent_team_propose` and `superagent_team_dispatch`. You cannot dissolve the group. If you are not the owner, a group message is refused. A direct conversation has no owner: any member of it may speak.
+- Any member of a group or direct conversation may speak in it with `superagent_team_message` (including the all-hands group). A group's owner is its leadId: only the owner may add and remove members with `superagent_team_add_member` and `superagent_team_remove_member` (not yourself, and not in the all-hands group), and propose and dispatch with `superagent_team_propose` and `superagent_team_dispatch`. You cannot dissolve a group.
 
 Delegate concrete implementation to a worker when the task is larger than a local change you can carry yourself, with `superagent_delegate`. It creates a Ticket under a team mandate and starts a worker; follow the worker's report and fold its result into your task.
 
